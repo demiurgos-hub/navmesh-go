@@ -1,0 +1,8 @@
+/bin/
+/coverage.out
+*.test
+*.exe
+go.work
+go.work.sum
+.DS_Store
+Thumbs.db
