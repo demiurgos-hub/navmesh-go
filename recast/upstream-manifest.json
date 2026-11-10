@@ -1,0 +1,288 @@
+{
+  "schema": 1,
+  "algorithm_reference": {
+    "repository": "https://github.com/recastnavigation/recastnavigation",
+    "revision": "9f4ce64458dfae86e1239c525ddc219c4e9e06f1",
+    "verified_date": "2026-11-10",
+    "license": "Zlib"
+  },
+  "initial_translation": {
+    "repository": "https://github.com/actfuns/recastnavigation",
+    "revision": "9d1a09ada038de17331aa2933bda24f77d08c999",
+    "package": "recast only",
+    "license_declaration": "README.md: same as original project — Zlib License"
+  },
+  "stages": [
+    {
+      "upstream": "Recast.cpp / Recast.h",
+      "files": [
+        "recast.go",
+        "types.go"
+      ],
+      "functions": [
+        "CalcBounds",
+        "CalcGridSize",
+        "CreateHeightfield",
+        "MarkWalkableTriangles",
+        "ClearUnwalkableTriangles",
+        "BuildCompactHeightfield"
+      ],
+      "tests": [
+        "recast_test.go",
+        "build_test.go"
+      ],
+      "deviations": [
+        "Excess compact neighbor layers are capacity failures."
+      ]
+    },
+    {
+      "upstream": "RecastRasterization.cpp",
+      "files": [
+        "rasterization.go"
+      ],
+      "functions": [
+        "AddSpan",
+        "RasterizeTriangle",
+        "RasterizeTriangles",
+        "addSpan",
+        "dividePoly"
+      ],
+      "tests": [
+        "recast_rasterization_test.go",
+        "build_test.go"
+      ],
+      "deviations": [
+        "Bounded active spans in Build; checked AddSpan arguments."
+      ]
+    },
+    {
+      "upstream": "RecastFilter.cpp",
+      "files": [
+        "filter.go"
+      ],
+      "functions": [
+        "FilterLowHangingWalkableObstacles",
+        "FilterLedgeSpans",
+        "FilterWalkableLowHeightSpans"
+      ],
+      "tests": [
+        "recast_filter_test.go",
+        "TestBuildSlopeAndClearance"
+      ]
+    },
+    {
+      "upstream": "RecastArea.cpp",
+      "files": [
+        "area.go"
+      ],
+      "functions": [
+        "ErodeWalkableArea",
+        "MedianFilterWalkableArea",
+        "MarkBoxArea",
+        "MarkConvexPolyArea",
+        "MarkCylinderArea",
+        "OffsetPoly"
+      ],
+      "tests": [
+        "TestBuildPreservesAreasAndNeverRestoresExclusions",
+        "TestErodeAndMarkAreas"
+      ],
+      "deviations": [
+        "Build marks exclusions before erosion."
+      ]
+    },
+    {
+      "upstream": "RecastRegion.cpp",
+      "files": [
+        "region.go"
+      ],
+      "functions": [
+        "BuildDistanceField",
+        "BuildRegionsMonotone",
+        "BuildRegions",
+        "BuildLayerRegions"
+      ],
+      "tests": [
+        "TestBuildRegions",
+        "TestBuildAllPartitionsStackedSurfacesAndHole",
+        "TestUpstreamOracle"
+      ],
+      "deviations": [
+        "Grow sweep storage for multiple spans per row.",
+        "Fail before region IDs collide with border bit.",
+        "Reject watershed overlap.",
+        "Cooperative outer-loop cancellation."
+      ]
+    },
+    {
+      "upstream": "RecastContour.cpp",
+      "files": [
+        "contour.go"
+      ],
+      "functions": [
+        "BuildContours",
+        "walkContour",
+        "simplifyContour",
+        "mergeRegionHoles"
+      ],
+      "tests": [
+        "TestBuildContourSet",
+        "TestBuildAllPartitionsStackedSurfacesAndHole",
+        "TestUpstreamOracle"
+      ],
+      "deviations": [
+        "Failed hole merges and incomplete capped traces are build failures."
+      ]
+    },
+    {
+      "upstream": "RecastMesh.cpp",
+      "files": [
+        "mesh.go"
+      ],
+      "functions": [
+        "BuildPolyMesh",
+        "MergePolyMeshes",
+        "CopyPolyMesh",
+        "triangulate",
+        "removeVertex",
+        "buildMeshAdjacency"
+      ],
+      "tests": [
+        "TestFullNavmeshBuild",
+        "TestUpstreamOracle",
+        "TestBakedStackedSurfacesRemainDisconnectedInDetour"
+      ],
+      "deviations": [
+        "BuildPolyMeshChecked reports failures.",
+        "Reject partial triangulation.",
+        "Promote uint16 indices before multiplication.",
+        "Use uint32 triangulation flag masks so bit31 does not overflow int on 386."
+      ]
+    },
+    {
+      "upstream": "RecastMeshDetail.cpp",
+      "files": [
+        "mesh_detail.go",
+        "contour.go"
+      ],
+      "functions": [
+        "BuildPolyMeshDetail",
+        "MergePolyMeshDetails",
+        "buildPolyDetail",
+        "getHeightData",
+        "distToPoly",
+        "delaunayHull"
+      ],
+      "tests": [
+        "TestBuildSlopeAndClearance",
+        "TestBuildAllPartitionsStackedSurfacesAndHole",
+        "TestCircumCircleIsEquidistant",
+        "TestDelaunayHullCoversConvexInterior",
+        "TestBuildDetailRefinementOnWavySurface",
+        "TestDetailHeightPatchFullQueueBatchAndCancellation",
+        "TestDetailSamplingZeroAndTinyDistance",
+        "TestDetailSamplingBudgetAndCheckedHeightSearch",
+        "TestDetailHeightSearchCancellation",
+        "TestDetailCandidateAndRefinementCancellation",
+        "TestUpstreamOracle"
+      ],
+      "deviations": [
+        "Correct two translated C++ postincrement loops.",
+        "Use uint32 jitter hash arithmetic and floating division instead of truncated integer division (also 386-safe).",
+        "Correct circumcircle Z numerator sign and measure radius from the translated origin, matching the reference; prevents overlapping/excess detail triangles during interior refinement.",
+        "Promote uint16 indices before multiplication.",
+        "Reject invalid/empty detail patches.",
+        "Cooperative per-polygon, height-row, candidate collection, refinement, fallback height spiral and bounded BFS/DFS cancellation.",
+        "Zero DetailSampleDist triangulates the original polygon hull without extra height samples; deliberately repairs the pinned C++ empty-hull path.",
+        "Cumulative default limit of 1048576 candidate grid locations per Build (BuildOptions.MaxDetailSamples); check coordinates, rectangle sizes and sample storage before narrowing, allocation or iteration; exhaustion is ErrCapacity, never a fidelity clamp. Low-level BuildPolyMeshDetail uses the same default.",
+        "MaxSimplificationError above 23169 voxels is rejected before converting to detail height-search radius; keeps the spiral iteration count in signed 32-bit range.",
+        "Clamp edge sample counts to the existing upstream edge limit before integer conversion; guard exhausted vertex capacity against division by zero.",
+        "Corrected height-patch queue resize scope: exactly 256 consumed entries must be removed, not replayed forever (TestDetailHeightPatchFullQueueBatchAndCancellation, TestBakedClimbThresholds, exact step-above C++ comparison)."
+      ]
+    },
+    {
+      "upstream": "RecastLayers.cpp",
+      "files": [
+        "layers.go"
+      ],
+      "functions": [
+        "BuildHeightfieldLayers"
+      ],
+      "tests": [
+        "TestBuildAllPartitionsStackedSurfacesAndHole",
+        "TestUpstreamOracle"
+      ],
+      "deviations": [
+        "Reject neighbor/layer/stack overflow.",
+        "Guard uint8 sweep rollover.",
+        "Cooperative row cancellation."
+      ]
+    }
+  ],
+  "upstream_fixes": [
+    {
+      "revision": "762ecb5d79ab5b5a936ecb9141f9844cf7bc04a6",
+      "fix": "invalid spans ignored with warning",
+      "function": "AddSpan",
+      "tests": [
+        "TestAddSpan"
+      ]
+    },
+    {
+      "revision": "9f4ce64458dfae86e1239c525ddc219c4e9e06f1",
+      "fix": "empty detail triangle guard",
+      "function": "buildPolyDetail",
+      "tests": [
+        "TestBuildSlopeAndClearance",
+        "TestUpstreamOracle"
+      ]
+    }
+  ],
+  "qualification": {
+    "native_runtime_dependencies": false,
+    "optional_oracle": "testdata/oracle/main.cpp; NAVMESH_RECAST_ORACLE opt-in",
+    "oracle_cases": [
+      "floor",
+      "slope",
+      "stacked-hole",
+      "padded-tile",
+      "step-above",
+      "radius-safe",
+      "radius-thin",
+      "wavy-detail"
+    ],
+    "oracle_modes": [
+      "monotone",
+      "watershed",
+      "layer regions"
+    ],
+    "comparison": "sampled surface coverage, area, stacked height/projection/height within 0.0001 local world unit; ray fraction within 0.0001; exact layer count/distance-field maximum and complete/partial ordinary+sliced path/raycast statuses",
+    "runtime_deviations": [
+      {
+        "function": "Detour GetPolyHeight",
+        "case": "slope polygon edge at (-4, 0.6, -4), all three partition modes",
+        "go": "SUCCESS, height 0.6 (triangle-edge tolerance)",
+        "upstream": "FAILURE | INVALID_PARAM (strict point-in-polygon exclusion)",
+        "test": "TestUpstreamOracle explicit BoundaryHeight probe; projections, paths and raycasts must still match",
+        "policy": "Retain usable portal height pending broader corridor-boundary contract review; do not silently require status parity at this edge."
+      }
+    ],
+    "byte_equality_required": false,
+    "production_qualified": false,
+    "remaining": [
+      "broader authored-world/threshold corpus",
+      "full branch-level audit",
+      "representative peak-memory/tail-latency measurements",
+      "continuous fuzz/platform evidence",
+      "auxiliary merge/offset qualification"
+    ]
+  },
+  "update_process": [
+    "Review C++ diffs against the pin.",
+    "Map each fix to Go functions.",
+    "Record safety deviations.",
+    "Add reproducers.",
+    "Run Go regressions and explicit oracle.",
+    "Update manifest and release notes after review."
+  ]
+}

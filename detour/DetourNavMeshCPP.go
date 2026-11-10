@@ -19,8 +19,8 @@
 package detour
 
 import (
+	"encoding/binary"
 	"math"
-	"reflect"
 	"unsafe"
 )
 
@@ -175,6 +175,12 @@ func (this *DtNavMesh) destructor() {
 // /  @param[in]	params		Initialization parameters.
 // / @return The status flags for the operation.
 func (this *DtNavMesh) Init(params *DtNavMeshParams) DtStatus {
+	if params == nil || !finite3(params.Orig[:]) || !finite(params.TileWidth) || !finite(params.TileHeight) || params.TileWidth <= 0 || params.TileHeight <= 0 || params.MaxTiles == 0 || params.MaxPolys == 0 || params.MaxTiles > 1<<20 || params.MaxPolys > 65536 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+	if DtIlog2(DtNextPow2(params.MaxTiles))+DtIlog2(DtNextPow2(params.MaxPolys)) > 22 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
 	this.m_params = *params
 	DtVcopy(this.m_orig[:], params.Orig[:])
 	this.m_tileWidth = params.TileWidth
@@ -223,17 +229,14 @@ func (this *DtNavMesh) Init(params *DtNavMeshParams) DtStatus {
 // / @return The status flags for the operation.
 // /  @see dtCreateNavMeshData
 func (this *DtNavMesh) Init2(data []byte, dataSize int, flags DtTileFlags) DtStatus {
-	// Make sure the data is in right format.
-	if dataSize < DtAlign4(int(unsafe.Sizeof(DtMeshHeader{}))) {
+	if dataSize != len(data) {
 		return DT_FAILURE | DT_INVALID_PARAM
 	}
-	header := (*DtMeshHeader)(unsafe.Pointer(&(data[0])))
-	if header.Magic != DT_NAVMESH_MAGIC {
-		return DT_FAILURE | DT_WRONG_MAGIC
+	decoded, err := DecodeNavMeshData(data)
+	if err != nil {
+		return tileErrorStatus(err)
 	}
-	if header.Version != DT_NAVMESH_VERSION {
-		return DT_FAILURE | DT_WRONG_VERSION
-	}
+	header := decoded.Header
 	var params DtNavMeshParams
 	DtVcopy(params.Orig[:], header.Bmin[:])
 	params.TileWidth = header.Bmax[0] - header.Bmin[0]
@@ -824,16 +827,22 @@ func (this *DtNavMesh) queryPolygonsInTile(tile *DtMeshTile, qmin, qmax []float3
 func (this *DtNavMesh) AddTile(data []byte, dataSize int, flags DtTileFlags,
 	lastRef DtTileRef, result *DtTileRef) DtStatus {
 
-	// Make sure the data is in right format.
-	if dataSize < DtAlign4(int(unsafe.Sizeof(DtMeshHeader{}))) {
+	if result != nil {
+		*result = 0
+	}
+	if this == nil || this.m_maxTiles <= 0 || dataSize != len(data) {
 		return DT_FAILURE | DT_INVALID_PARAM
 	}
-	header := (*DtMeshHeader)(unsafe.Pointer(&(data[0])))
-	if header.Magic != DT_NAVMESH_MAGIC {
-		return DT_FAILURE | DT_WRONG_MAGIC
+	decoded, err := DecodeNavMeshData(data)
+	if err != nil {
+		return tileErrorStatus(err)
 	}
-	if header.Version != DT_NAVMESH_VERSION {
-		return DT_FAILURE | DT_WRONG_VERSION
+	header := decoded.Header
+	if uint32(header.PolyCount) > this.m_params.MaxPolys {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+	if lastRef != 0 && (this.DecodePolyIdPoly(DtPolyRef(lastRef)) != 0 || this.DecodePolyIdSalt(DtPolyRef(lastRef)) == 0) {
+		return DT_FAILURE | DT_INVALID_PARAM
 	}
 
 	// Make sure the location is free.
@@ -886,81 +895,17 @@ func (this *DtNavMesh) AddTile(data []byte, dataSize int, flags DtTileFlags,
 	tile.Next = this.m_posLookup[h]
 	this.m_posLookup[h] = tile
 
-	// Patch header pointers.
-	headerSize := DtAlign4(int(unsafe.Sizeof(DtMeshHeader{})))
-	vertsSize := DtAlign4(int(unsafe.Sizeof(float32(1.0))) * 3 * int(header.VertCount))
-	polysSize := DtAlign4(int(unsafe.Sizeof(DtPoly{})) * int(header.PolyCount))
-	linksSize := DtAlign4(int(unsafe.Sizeof(DtLink{})) * int(header.MaxLinkCount))
-	detailMeshesSize := DtAlign4(int(unsafe.Sizeof(DtPolyDetail{})) * int(header.DetailMeshCount))
-	detailVertsSize := DtAlign4(int(unsafe.Sizeof(float32(1.0))) * 3 * int(header.DetailVertCount))
-	detailTrisSize := DtAlign4(int(unsafe.Sizeof(uint8(1))) * 4 * int(header.DetailTriCount))
-	bvtreeSize := DtAlign4(int(unsafe.Sizeof(DtBVNode{})) * int(header.BvNodeCount))
-	offMeshLinksSize := DtAlign4(int(unsafe.Sizeof(DtOffMeshConnection{})) * int(header.OffMeshConCount))
-
-	d := 0 + headerSize
-
-	sliceHeader := (*reflect.SliceHeader)((unsafe.Pointer(&(tile.Verts))))
-	sliceHeader.Cap = 3 * int(header.VertCount)
-	sliceHeader.Len = 3 * int(header.VertCount)
-	sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-	d += vertsSize
-
-	sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&(tile.Polys))))
-	sliceHeader.Cap = int(header.PolyCount)
-	sliceHeader.Len = int(header.PolyCount)
-	sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-	d += polysSize
-
-	sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&(tile.Links))))
-	sliceHeader.Cap = int(header.MaxLinkCount)
-	sliceHeader.Len = int(header.MaxLinkCount)
-	sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-	d += linksSize
-
-	if header.DetailMeshCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&(tile.DetailMeshes))))
-		sliceHeader.Cap = int(header.DetailMeshCount)
-		sliceHeader.Len = int(header.DetailMeshCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += detailMeshesSize
-	}
-
-	if header.DetailVertCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&(tile.DetailVerts))))
-		sliceHeader.Cap = 3 * int(header.DetailVertCount)
-		sliceHeader.Len = 3 * int(header.DetailVertCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += detailVertsSize
-	}
-
-	if header.DetailTriCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&(tile.DetailTris))))
-		sliceHeader.Cap = 4 * int(header.DetailTriCount)
-		sliceHeader.Len = 4 * int(header.DetailTriCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += detailTrisSize
-	}
-
-	if header.BvNodeCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&(tile.BvTree))))
-		sliceHeader.Cap = int(header.BvNodeCount)
-		sliceHeader.Len = int(header.BvNodeCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += bvtreeSize
-	}
-
-	if header.OffMeshConCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&(tile.OffMeshCons))))
-		sliceHeader.Cap = int(header.OffMeshConCount)
-		sliceHeader.Len = int(header.OffMeshConCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += offMeshLinksSize
-	}
-
-	// If there are no items in the bvtree, reset the tree pointer.
-	if header.BvNodeCount == 0 {
-		tile.BvTree = nil
-	}
+	// Decoding completed before any mesh state changed. Keep all runtime arrays
+	// separate from the caller's encoded bytes and from other mesh instances.
+	tile.Header = header
+	tile.Verts = decoded.Verts
+	tile.Polys = decoded.Polys
+	tile.Links = decoded.Links
+	tile.DetailMeshes = decoded.DetailMeshes
+	tile.DetailVerts = decoded.DetailVerts
+	tile.DetailTris = decoded.DetailTris
+	tile.BvTree = decoded.BvTree
+	tile.OffMeshCons = decoded.OffMeshCons
 
 	// Build links freelist
 	tile.LinksFreeList = 0
@@ -971,8 +916,8 @@ func (this *DtNavMesh) AddTile(data []byte, dataSize int, flags DtTileFlags,
 
 	// Init tile.
 	tile.Header = header
-	tile.Data = data
-	tile.DataSize = int32(dataSize)
+	tile.Data = decoded.Data
+	tile.DataSize = decoded.DataSize
 	tile.Flags = flags
 
 	this.connectIntLinks(tile)
@@ -1021,6 +966,10 @@ func (this *DtNavMesh) AddTile(data []byte, dataSize int, flags DtTileFlags,
 // /  @param[in]	layer	The tile's layer. (x, y, layer)
 // / @return The tile, or null if the tile does not exist.
 func (this *DtNavMesh) GetTileAt(x, y, layer int32) *DtMeshTile {
+	if this == nil || len(this.m_posLookup) == 0 {
+		return nil
+	}
+
 	// Find tile based on hash.
 	h := computeTileHash(x, y, int32(this.m_tileLutMask))
 	tile := this.m_posLookup[h]
@@ -1076,6 +1025,10 @@ func (this *DtNavMesh) GetNeighbourTilesAt(x, y int32, side int, tiles []*DtMesh
 // / This function will not fail if the tiles array is too small to hold the
 // / entire result set.  It will simply fill the array to capacity.
 func (this *DtNavMesh) GetTilesAt(x, y int32, tiles []*DtMeshTile, maxTiles int) int {
+	if this == nil || len(this.m_posLookup) == 0 || maxTiles < 0 || maxTiles > len(tiles) {
+		return 0
+	}
+
 	n := 0
 
 	// Find tile based on hash.
@@ -1145,6 +1098,10 @@ func (this *DtNavMesh) GetMaxTiles() int32 {
 
 // / Returns pointer to tile in the tile array.
 func (this *DtNavMesh) GetTile(i int) *DtMeshTile {
+	if this == nil || i < 0 || i >= len(this.m_tiles) {
+		return nil
+	}
+
 	return &this.m_tiles[i]
 }
 
@@ -1238,7 +1195,7 @@ func (this *DtNavMesh) RemoveTile(ref DtTileRef, data *[]byte, dataSize *int) Dt
 		return DT_FAILURE | DT_INVALID_PARAM
 	}
 	tile := &this.m_tiles[tileIndex]
-	if tile.Salt != tileSalt {
+	if tile.Salt != tileSalt || tile.Header == nil {
 		return DT_FAILURE | DT_INVALID_PARAM
 	}
 	// Remove tile from hash lookup.
@@ -1328,13 +1285,22 @@ func (this *DtNavMesh) RemoveTile(ref DtTileRef, data *[]byte, dataSize *int) Dt
 // /  @param[in]	tile	The tile.
 // / @return The tile reference of the tile.
 func (this *DtNavMesh) GetTileRef(tile *DtMeshTile) DtTileRef {
-	if tile == nil {
+	if tile == nil || len(this.m_tiles) == 0 {
 		return 0
 	}
-	tileBase := uintptr(unsafe.Pointer(&(this.m_tiles[0])))
-	current := uintptr(unsafe.Pointer(tile))
-	it := (uint32)(current-tileBase) / sizeofMeshTile
-	return (DtTileRef)(this.EncodePolyId(tile.Salt, it, 0))
+	base, current := uintptr(unsafe.Pointer(&this.m_tiles[0])), uintptr(unsafe.Pointer(tile))
+	if current < base {
+		return 0
+	}
+	offset := current - base
+	if offset%uintptr(sizeofMeshTile) != 0 {
+		return 0
+	}
+	index := offset / uintptr(sizeofMeshTile)
+	if index >= uintptr(len(this.m_tiles)) || &this.m_tiles[index] != tile || tile.Header == nil {
+		return 0
+	}
+	return DtTileRef(this.EncodePolyId(tile.Salt, uint32(index), 0))
 }
 
 // / Gets the polygon reference for the tile's base polygon.
@@ -1355,13 +1321,22 @@ func (this *DtNavMesh) GetTileRef(tile *DtMeshTile) DtTileRef {
 // / }
 // / @endcode
 func (this *DtNavMesh) GetPolyRefBase(tile *DtMeshTile) DtPolyRef {
-	if tile == nil {
+	if tile == nil || len(this.m_tiles) == 0 {
 		return 0
 	}
-	tileBase := uintptr(unsafe.Pointer(&(this.m_tiles[0])))
-	current := uintptr(unsafe.Pointer(tile))
-	it := (uint32)(current-tileBase) / sizeofMeshTile
-	return this.EncodePolyId(tile.Salt, it, 0)
+	base, current := uintptr(unsafe.Pointer(&this.m_tiles[0])), uintptr(unsafe.Pointer(tile))
+	if current < base {
+		return 0
+	}
+	offset := current - base
+	if offset%uintptr(sizeofMeshTile) != 0 {
+		return 0
+	}
+	index := offset / uintptr(sizeofMeshTile)
+	if index >= uintptr(len(this.m_tiles)) || &this.m_tiles[index] != tile || tile.Header == nil {
+		return 0
+	}
+	return this.EncodePolyId(tile.Salt, uint32(index), 0)
 }
 
 type dtTileState struct {
@@ -1379,12 +1354,10 @@ type dtPolyState struct {
 // /  @param[in]	tile	The tile.
 // / @return The size of the buffer required to store the state.
 func (this *DtNavMesh) GetTileStateSize(tile *DtMeshTile) int {
-	if tile == nil {
+	if tile == nil || tile.Header == nil || int64(tile.Header.PolyCount) != int64(len(tile.Polys)) {
 		return 0
 	}
-	headerSize := DtAlign4(int(unsafe.Sizeof(dtTileState{})))
-	polyStateSize := DtAlign4(int(unsafe.Sizeof(dtPolyState{})) * int(tile.Header.PolyCount))
-	return headerSize + polyStateSize
+	return 12 + len(tile.Polys)*4
 }
 
 // / Stores the non-structural state of the tile in the specified buffer. (Flags, area ids, etc.)
@@ -1398,32 +1371,22 @@ func (this *DtNavMesh) GetTileStateSize(tile *DtMeshTile) int {
 // / @note The state data is only valid until the tile reference changes.
 // / @see #getTileStateSize, #restoreTileState
 func (this *DtNavMesh) StoreTileState(tile *DtMeshTile, data []byte, maxDataSize int) DtStatus {
-	// Make sure there is enough space to store the state.
-	sizeReq := this.GetTileStateSize(tile)
-	if maxDataSize < sizeReq {
+	size := this.GetTileStateSize(tile)
+	if size == 0 || maxDataSize < 0 || maxDataSize > len(data) || this.GetTileRef(tile) == 0 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+	if maxDataSize < size {
 		return DT_FAILURE | DT_BUFFER_TOO_SMALL
 	}
-
-	tileState := (*dtTileState)(unsafe.Pointer(&(data[0])))
-	var polyStates []dtPolyState
-	sliceHeader := (*reflect.SliceHeader)((unsafe.Pointer(&polyStates)))
-	sliceHeader.Cap = int(tile.Header.PolyCount)
-	sliceHeader.Len = int(tile.Header.PolyCount)
-	sliceHeader.Data = uintptr(unsafe.Pointer(&(data[DtAlign4(int(unsafe.Sizeof(dtTileState{})))])))
-
-	// Store tile state.
-	tileState.magic = DT_NAVMESH_STATE_MAGIC
-	tileState.version = DT_NAVMESH_STATE_VERSION
-	tileState.ref = this.GetTileRef(tile)
-
-	// Store per poly state.
-	for i := 0; i < int(tile.Header.PolyCount); i++ {
-		p := &tile.Polys[i]
-		s := &polyStates[i]
-		s.flags = p.Flags
-		s.area = p.GetArea()
+	binary.LittleEndian.PutUint32(data, uint32(DT_NAVMESH_STATE_MAGIC))
+	binary.LittleEndian.PutUint32(data[4:], uint32(DT_NAVMESH_STATE_VERSION))
+	binary.LittleEndian.PutUint32(data[8:], uint32(this.GetTileRef(tile)))
+	for i, p := range tile.Polys {
+		offset := 12 + i*4
+		binary.LittleEndian.PutUint16(data[offset:], p.Flags)
+		data[offset+2] = p.GetArea()
+		data[offset+3] = 0
 	}
-
 	return DT_SUCCESS
 }
 
@@ -1438,38 +1401,32 @@ func (this *DtNavMesh) StoreTileState(tile *DtMeshTile, data []byte, maxDataSize
 // / @note This function does not impact the tile's #dtTileRef and #dtPolyRef's.
 // / @see #storeTileState
 func (this *DtNavMesh) RestoreTileState(tile *DtMeshTile, data []byte, maxDataSize int) DtStatus {
-	// Make sure there is enough space to store the state.
-	sizeReq := this.GetTileStateSize(tile)
-	if maxDataSize < sizeReq {
-		return DT_FAILURE | DT_BUFFER_TOO_SMALL
-	}
-
-	tileState := (*dtTileState)(unsafe.Pointer(&(data[0])))
-	var polyStates []dtPolyState
-	sliceHeader := (*reflect.SliceHeader)((unsafe.Pointer(&polyStates)))
-	sliceHeader.Cap = int(tile.Header.PolyCount)
-	sliceHeader.Len = int(tile.Header.PolyCount)
-	sliceHeader.Data = uintptr(unsafe.Pointer(&(data[DtAlign4(int(unsafe.Sizeof(dtTileState{})))])))
-
-	// Check that the restore is possible.
-	if tileState.magic != DT_NAVMESH_STATE_MAGIC {
-		return DT_FAILURE | DT_WRONG_MAGIC
-	}
-	if tileState.version != DT_NAVMESH_STATE_VERSION {
-		return DT_FAILURE | DT_WRONG_VERSION
-	}
-	if tileState.ref != this.GetTileRef(tile) {
+	size := this.GetTileStateSize(tile)
+	if size == 0 || maxDataSize < 0 || maxDataSize > len(data) || this.GetTileRef(tile) == 0 {
 		return DT_FAILURE | DT_INVALID_PARAM
 	}
-
-	// Restore per poly state.
-	for i := 0; i < int(tile.Header.PolyCount); i++ {
-		p := &tile.Polys[i]
-		s := &polyStates[i]
-		p.Flags = s.flags
-		p.SetArea(s.area)
+	if maxDataSize < size {
+		return DT_FAILURE | DT_BUFFER_TOO_SMALL
 	}
-
+	if binary.LittleEndian.Uint32(data) != uint32(DT_NAVMESH_STATE_MAGIC) {
+		return DT_FAILURE | DT_WRONG_MAGIC
+	}
+	if binary.LittleEndian.Uint32(data[4:]) != uint32(DT_NAVMESH_STATE_VERSION) {
+		return DT_FAILURE | DT_WRONG_VERSION
+	}
+	if binary.LittleEndian.Uint32(data[8:]) != uint32(this.GetTileRef(tile)) {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+	for i := range tile.Polys {
+		if data[12+i*4+2] >= uint8(DT_MAX_AREAS) {
+			return DT_FAILURE | DT_INVALID_PARAM
+		}
+	}
+	for i := range tile.Polys {
+		offset := 12 + i*4
+		tile.Polys[i].Flags = binary.LittleEndian.Uint16(data[offset:])
+		tile.Polys[i].SetArea(data[offset+2])
+	}
 	return DT_SUCCESS
 }
 
@@ -1487,6 +1444,10 @@ func (this *DtNavMesh) RestoreTileState(tile *DtMeshTile, data []byte, maxDataSi
 // / normal polygon at one of its endpoints. This is the polygon identified by
 // / the prevRef parameter.
 func (this *DtNavMesh) GetOffMeshConnectionPolyEndPoints(prevRef, polyRef DtPolyRef, startPos, endPos []float32) DtStatus {
+	if len(startPos) < 3 || len(endPos) < 3 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	var salt, it, ip uint32
 
 	if polyRef == 0 {

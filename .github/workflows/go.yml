@@ -1,0 +1,86 @@
+name: Pure Go and diagnostics
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pure-go:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            go: '1.26.4'
+          - os: ubuntu-24.04
+            go: '1.26.4'
+          - os: ubuntu-24.04-arm
+            go: '1.26.4'
+          - os: ubuntu-22.04
+            go: '1.20.14'
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - run: go version
+      - run: go run ./.github/scripts/check-purego
+      - run: go build ./...
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go test -gcflags=all=-d=checkptr=2 ./...
+      - name: Required fixtures are actual files
+        shell: bash
+        run: |
+          if git grep -l '^version https://git-lfs.github.com/spec/v1$' -- ':glob:**/testdata/**' 'examples/assets/navmesh.bin'; then
+            echo 'A required fixture is an unhydrated Git LFS pointer.'
+            exit 1
+          fi
+          test -s examples/assets/navmesh.bin
+
+  race:
+    runs-on: ubuntu-24.04
+    env:
+      # The race detector requires cgo and a C compiler for instrumentation.
+      # This is a diagnostic job, not a production runtime dependency.
+      CGO_ENABLED: '1'
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - run: go test -race ./...
+
+  benchmarks:
+    runs-on: ubuntu-24.04
+    env:
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - name: Capture measurements without asserting machine capacity
+        run: |
+          go version > benchmarks.txt
+          go env GOOS GOARCH >> benchmarks.txt
+          go test ./... -run '^$' -bench . -benchmem -benchtime=200ms -count=3 >> benchmarks.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-observations
+          path: benchmarks.txt

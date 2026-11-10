@@ -19,8 +19,7 @@
 package dtcache
 
 import (
-	"reflect"
-	"unsafe"
+	"encoding/binary"
 
 	detour "github.com/demiurgos-hub/navmesh-go/detour"
 )
@@ -169,7 +168,9 @@ func DtBuildTileCacheRegions(layer *DtTileCacheLayer, walkableClimb int32) detou
 
 	for y := int32(0); y < h; y++ {
 		if regId > 0 {
-			detour.Memset(uintptr(unsafe.Pointer(&(prevCount[0]))), 0, int(regId))
+			for i := 0; i < int(regId); i++ {
+				prevCount[i] = 0
+			}
 		}
 		var sweepId uint8
 
@@ -1293,7 +1294,9 @@ func mergePolys(pa, pb []uint16, ea, eb int32) {
 	nb := countPolyVerts(pb)
 
 	// Merge polygons.
-	detour.Memset(uintptr(unsafe.Pointer(&tmp[0])), 0xff, int(MAX_VERTS_PER_POLY*2))
+	for i := range tmp {
+		tmp[i] = 0xffff
+	}
 
 	var n int32
 	// Add pa
@@ -1457,7 +1460,9 @@ func removeVertex(mesh *DtTileCachePolyMesh, rem uint16, maxTris int32) detour.D
 			// Remove the polygon.
 			p2 := mesh.Polys[(mesh.Npolys-1)*MAX_VERTS_PER_POLY*2:]
 			copy(p, p2[:MAX_VERTS_PER_POLY])
-			detour.Memset(uintptr(unsafe.Pointer(&p[MAX_VERTS_PER_POLY])), 0xff, ShortSize*int(MAX_VERTS_PER_POLY))
+			for i := int(MAX_VERTS_PER_POLY); i < int(MAX_VERTS_PER_POLY*2); i++ {
+				p[i] = 0xffff
+			}
 
 			mesh.Areas[i] = mesh.Areas[mesh.Npolys-1]
 			mesh.Npolys--
@@ -1572,7 +1577,9 @@ func removeVertex(mesh *DtTileCachePolyMesh, rem uint16, maxTris int32) detour.D
 
 	// Build initial polygons.
 	var npolys int32
-	detour.Memset(uintptr(unsafe.Pointer(&polys[0])), 0xff, int(ntris*MAX_VERTS_PER_POLY)*ShortSize)
+	for i := range polys {
+		polys[i] = 0xffff
+	}
 	for j := int32(0); j < ntris; j++ {
 		t := tris[j*3:]
 		if t[0] != t[1] && t[0] != t[2] && t[1] != t[2] {
@@ -1631,7 +1638,9 @@ func removeVertex(mesh *DtTileCachePolyMesh, rem uint16, maxTris int32) detour.D
 			break
 		}
 		p := mesh.Polys[mesh.Npolys*MAX_VERTS_PER_POLY*2:]
-		detour.Memset(uintptr(unsafe.Pointer(&p[0])), 0xff, ShortSize*int(MAX_VERTS_PER_POLY*2))
+		for i := 0; i < int(MAX_VERTS_PER_POLY*2); i++ {
+			p[i] = 0xffff
+		}
 		for j := int32(0); j < MAX_VERTS_PER_POLY; j++ {
 			p[j] = polys[i*MAX_VERTS_PER_POLY+j]
 		}
@@ -1690,11 +1699,15 @@ func DtBuildTileCachePolyMesh(lcset *DtTileCacheContourSet, mesh *DtTileCachePol
 	mesh.Npolys = 0
 
 	if len(mesh.Polys) != 0 {
-		detour.Memset(uintptr(unsafe.Pointer(&(mesh.Polys[0]))), 0xff, ShortSize*int(maxTris*MAX_VERTS_PER_POLY*2))
+		for i := range mesh.Polys {
+			mesh.Polys[i] = 0xffff
+		}
 	}
 
 	var firstVert [VERTEX_BUCKET_COUNT2]uint16
-	detour.Memset(uintptr(unsafe.Pointer(&firstVert[0])), 0xff, ShortSize*int(VERTEX_BUCKET_COUNT2))
+	for i := range firstVert {
+		firstVert[i] = 0xffff
+	}
 
 	nextVert := make([]uint16, maxVertices)
 	if nextVert == nil {
@@ -1748,7 +1761,9 @@ func DtBuildTileCachePolyMesh(lcset *DtTileCacheContourSet, mesh *DtTileCachePol
 
 		// Build initial polygons.
 		var npolys int32
-		detour.Memset(uintptr(unsafe.Pointer(&(polys[0]))), 0xff, ShortSize*int(maxVertsPerCont*MAX_VERTS_PER_POLY))
+		for i := range polys {
+			polys[i] = 0xffff
+		}
 		for j := int32(0); j < ntris; j++ {
 			t := tris[j*3:]
 			if t[0] != t[1] && t[0] != t[2] && t[1] != t[2] {
@@ -2034,149 +2049,90 @@ func DtMarkBoxArea2(layer *DtTileCacheLayer, orig []float32, cs, ch float32,
 	return detour.DT_SUCCESS
 }
 
-func DtBuildTileCacheLayer(comp DtTileCacheCompressor,
-	header *DtTileCacheLayerHeader,
-	heights, areas, cons []uint8,
-	outData *[]uint8, outDataSize *int32) detour.DtStatus {
-
-	headerSize := int32(detour.DtAlign4(int(DtTileCacheLayerHeaderSize)))
-	gridSize := int32(header.Width) * int32(header.Height)
-	maxDataSize := headerSize + comp.MaxCompressedSize(gridSize*3)
-	data := make([]byte, maxDataSize)
-	if data == nil {
-		return detour.DT_FAILURE | detour.DT_OUT_OF_MEMORY
+// DtBuildTileCacheLayer encodes a validated layer header and compressed grids.
+func DtBuildTileCacheLayer(comp DtTileCacheCompressor, header *DtTileCacheLayerHeader,
+	heights, areas, cons []uint8, outData *[]uint8, outDataSize *int32) detour.DtStatus {
+	if outData == nil || outDataSize == nil {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
 	}
-
-	// Store header
-	*(*DtTileCacheLayerHeader)(unsafe.Pointer(&data[0])) = *header
-
-	// Concatenate grid data for compression.
-	bufferSize := gridSize * 3
-	buffer := make([]uint8, bufferSize)
-	if buffer == nil {
-		return detour.DT_FAILURE | detour.DT_OUT_OF_MEMORY
+	*outData = nil
+	*outDataSize = 0
+	if comp == nil || !validLayerHeader(header) {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
 	}
-
-	copy(buffer[:gridSize], heights)
-	copy(buffer[gridSize:gridSize*2], areas)
-	copy(buffer[gridSize*2:gridSize*3], cons)
-
-	// Compress
-	compressed := data[headerSize:]
-	maxCompressedSize := maxDataSize - headerSize
-	var compressedSize int32
-	status := comp.Compress(buffer, bufferSize, compressed, maxCompressedSize, &compressedSize)
-	if detour.DtStatusFailed(status) {
-		return status
+	n := int(header.Width) * int(header.Height)
+	if len(heights) < n || len(areas) < n || len(cons) < n {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
 	}
-
-	*outData = data
-	*outDataSize = headerSize + compressedSize
-
-	buffer = nil
-
+	bound := comp.MaxCompressedSize(int32(n * 3))
+	if bound <= 0 || bound > MaxLayerDataSize-LayerHeaderSize {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+	buffer := make([]byte, n*3)
+	copy(buffer, heights[:n])
+	copy(buffer[n:], areas[:n])
+	copy(buffer[n*2:], cons[:n])
+	data := make([]byte, LayerHeaderSize+int(bound))
+	encodeLayerHeader(data, header)
+	var size int32
+	s := comp.Compress(buffer, int32(len(buffer)), data[LayerHeaderSize:], bound, &size)
+	if detour.DtStatusFailed(s) {
+		return s
+	}
+	if size <= 0 || size > bound {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+	*outData = data[:LayerHeaderSize+int(size)]
+	*outDataSize = int32(len(*outData))
 	return detour.DT_SUCCESS
 }
 
-func DtFreeTileCacheLayer(layer *DtTileCacheLayer) {
+// DtFreeTileCacheLayer releases no external resources; Go owns layer storage.
+func DtFreeTileCacheLayer(layer *DtTileCacheLayer) {}
 
-}
-
-func DtDecompressTileCacheLayer(comp DtTileCacheCompressor,
-	compressed []uint8, compressedSize int32,
-	layerOut **DtTileCacheLayer) detour.DtStatus {
-
-	detour.DtAssert(comp != nil)
-
+// DtDecompressTileCacheLayer validates exact decompressed length and uses typed,
+// independently owned Go storage instead of overlaying Go pointers on byte arrays.
+func DtDecompressTileCacheLayer(comp DtTileCacheCompressor, compressed []uint8, compressedSize int32, layerOut **DtTileCacheLayer) detour.DtStatus {
 	if layerOut == nil {
 		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
 	}
-	if compressed == nil {
+	*layerOut = nil
+	if comp == nil || int64(compressedSize) != int64(len(compressed)) {
 		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
 	}
-
-	*layerOut = nil
-
-	compressedHeader := (*DtTileCacheLayerHeader)(unsafe.Pointer(&compressed[0]))
-	if compressedHeader.Magic != DT_TILECACHE_MAGIC {
-		return detour.DT_FAILURE | detour.DT_WRONG_MAGIC
+	h, s := decodeLayerHeader(compressed)
+	if detour.DtStatusFailed(s) {
+		return s
 	}
-	if compressedHeader.Version != DT_TILECACHE_VERSION {
-		return detour.DT_FAILURE | detour.DT_WRONG_VERSION
-	}
-
-	layerSize := int32(detour.DtAlign4(int(DtTileCacheLayerSize)))
-	headerSize := int32(detour.DtAlign4(int(DtTileCacheLayerHeaderSize)))
-	gridSize := int32(compressedHeader.Width) * int32(compressedHeader.Height)
-	bufferSize := layerSize + headerSize + gridSize*4
-
-	buffer := make([]byte, bufferSize)
-	if buffer == nil {
-		return detour.DT_FAILURE | detour.DT_OUT_OF_MEMORY
-	}
-
-	layer := (*DtTileCacheLayer)(unsafe.Pointer(&buffer[0]))
-	header := (*DtTileCacheLayerHeader)(unsafe.Pointer(uintptr(unsafe.Pointer(&buffer[0])) + uintptr(layerSize)))
-
-	var grids []byte
-	gridsSize := bufferSize - (layerSize + headerSize)
-	sliceHeader := (*reflect.SliceHeader)((unsafe.Pointer(&grids)))
-	sliceHeader.Cap = int(gridsSize)
-	sliceHeader.Len = int(gridsSize)
-	sliceHeader.Data = uintptr(unsafe.Pointer(&buffer[0])) + uintptr(layerSize+headerSize)
-
-	// Copy header
-	*header = *compressedHeader
-	// Decompress grid.
+	n := int(h.Width) * int(h.Height)
+	grids := make([]byte, n*4)
 	var size int32
-	status := comp.Decompress(compressed[headerSize:], compressedSize-headerSize, grids, gridsSize, &size)
-	detour.DtIgnoreUnused(size)
-
-	if detour.DtStatusFailed(status) {
-		buffer = nil
-		return status
+	s = comp.Decompress(compressed[LayerHeaderSize:], compressedSize-LayerHeaderSize, grids[:n*3], int32(n*3), &size)
+	if detour.DtStatusFailed(s) {
+		return s
 	}
-
-	layer.Header = header
-	layer.Heights = grids
-	layer.Areas = grids[gridSize:]
-	layer.Cons = grids[gridSize*2:]
-	layer.Regs = grids[gridSize*3:]
-
-	*layerOut = layer
-
+	if size != int32(n*3) {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+	*layerOut = &DtTileCacheLayer{Header: h, Heights: grids[:n:n], Areas: grids[n : n*2 : n*2], Cons: grids[n*2 : n*3 : n*3], Regs: grids[n*3:]}
 	return detour.DT_SUCCESS
 }
 
+// DtTileCacheHeaderSwapEndian swaps only the fixed-width encoded header.
 func DtTileCacheHeaderSwapEndian(data []uint8, dataSize int32) bool {
-	// dtIgnoreUnused(dataSize)
-	header := (*DtTileCacheLayerHeader)(unsafe.Pointer(&data[0]))
-
-	swappedMagic := DT_TILECACHE_MAGIC
-	swappedVersion := DT_TILECACHE_VERSION
-	detour.DtSwapEndianInt32(&swappedMagic)
-	detour.DtSwapEndianInt32(&swappedVersion)
-
-	if (header.Magic != DT_TILECACHE_MAGIC || header.Version != DT_TILECACHE_VERSION) &&
-		(header.Magic != swappedMagic || header.Version != swappedVersion) {
+	if int64(dataSize) > int64(len(data)) || dataSize < LayerHeaderSize {
 		return false
 	}
-
-	detour.DtSwapEndianInt32(&header.Magic)
-	detour.DtSwapEndianInt32(&header.Version)
-	detour.DtSwapEndianInt32(&header.Tx)
-	detour.DtSwapEndianInt32(&header.Ty)
-	detour.DtSwapEndianInt32(&header.Tlayer)
-	detour.DtSwapEndianFloat32(&header.Bmin[0])
-	detour.DtSwapEndianFloat32(&header.Bmin[1])
-	detour.DtSwapEndianFloat32(&header.Bmin[2])
-	detour.DtSwapEndianFloat32(&header.Bmax[0])
-	detour.DtSwapEndianFloat32(&header.Bmax[1])
-	detour.DtSwapEndianFloat32(&header.Bmax[2])
-	detour.DtSwapEndianUInt16(&header.Hmin)
-	detour.DtSwapEndianUInt16(&header.Hmax)
-
-	// width, height, minx, maxx, miny, maxy are unsigned char, no need to swap.
-
+	le, be := binary.LittleEndian, binary.BigEndian
+	if !(le.Uint32(data) == uint32(DT_TILECACHE_MAGIC) && le.Uint32(data[4:]) == uint32(DT_TILECACHE_VERSION)) && !(be.Uint32(data) == uint32(DT_TILECACHE_MAGIC) && be.Uint32(data[4:]) == uint32(DT_TILECACHE_VERSION)) {
+		return false
+	}
+	for i := 0; i < 44; i += 4 {
+		data[i], data[i+3] = data[i+3], data[i]
+		data[i+1], data[i+2] = data[i+2], data[i+1]
+	}
+	for i := 44; i < 48; i += 2 {
+		data[i], data[i+1] = data[i+1], data[i]
+	}
 	return true
 }

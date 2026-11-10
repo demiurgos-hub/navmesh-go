@@ -1,0 +1,32 @@
+name: Optional pinned C++ oracle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    env:
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+      NAVMESH_RECAST_ORACLE: /tmp/navmesh-recast-oracle
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: recastnavigation/recastnavigation
+          ref: 9f4ce64458dfae86e1239c525ddc219c4e9e06f1
+          path: .reference
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - name: Build independent reference executable
+        run: |
+          test "$(git -C .reference rev-parse HEAD)" = '9f4ce64458dfae86e1239c525ddc219c4e9e06f1'
+          g++ -std=c++11 -O2 -I.reference/Recast/Include -I.reference/Detour/Include recast/testdata/oracle/main.cpp .reference/Recast/Source/*.cpp .reference/Detour/Source/*.cpp -o "$NAVMESH_RECAST_ORACLE"
+      - name: Compare identical resolved geometry and settings
+        run: go test ./recast -run TestUpstreamOracle -count=1 -v

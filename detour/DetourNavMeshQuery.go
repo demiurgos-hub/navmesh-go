@@ -80,6 +80,9 @@ func DtFreeDtQueryFilter(filter *DtQueryFilter) {
 // / filled by dtNavMeshQuery::raycast
 // / @ingroup detour
 type DtRaycastHit struct {
+	// LastRef is the final intersected polygon even when Path is truncated.
+	LastRef DtPolyRef
+
 	/// The hit parameter. (FLT_MAX if no wall hit.)
 	T float32
 
@@ -129,6 +132,7 @@ type dtQueryData struct {
 const DT_POLY_QUERY_BATCH_SIZE = 32
 
 type DtNavMeshQuery struct {
+	m_inPolyQuery  bool
 	m_nav          *DtNavMesh   ///< Pointer to navmesh data.
 	m_query        dtQueryData  ///< Sliced query state.
 	m_tinyNodePool *DtNodePool  ///< Pointer to small node pool.

@@ -331,7 +331,7 @@ func (this *DtCrowd) Init(maxAgents int, maxAgentRadius float32, nav *detour.DtN
 }
 
 func (this *DtCrowd) SetObstacleAvoidanceParams(idx int, params *DtObstacleAvoidanceParams) {
-	if idx >= 0 && idx <= DT_CROWD_MAX_OBSTAVOIDANCE_PARAMS {
+	if params != nil && idx >= 0 && idx < DT_CROWD_MAX_OBSTAVOIDANCE_PARAMS {
 		this.m_obstacleQueryParams[idx] = *params
 	}
 }

@@ -82,6 +82,15 @@ func (this *DtTileCache) GetTileByRef(ref DtCompressedTileRef) *DtCompressedTile
 func (this *DtTileCache) Init(params *DtTileCacheParams,
 	tcomp DtTileCacheCompressor,
 	tmproc DtTileCacheMeshProcess) detour.DtStatus {
+	if params == nil || tcomp == nil || !finite3(params.Orig[:]) || !finite(params.Cs) || params.Cs <= 0 || !finite(params.Ch) || params.Ch <= 0 || params.Width <= 0 || params.Width > 255 || params.Height <= 0 || params.Height > 255 || params.MaxTiles <= 0 || params.MaxTiles > 1<<20 || params.MaxObstacles < 0 || params.MaxObstacles > 65536 {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+	for _, v := range []float32{params.WalkableHeight, params.WalkableRadius, params.WalkableClimb, params.MaxSimplificationError} {
+		if !finite(v) || v < 0 {
+			return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+		}
+	}
+	this.m_nupdate = 0
 	this.m_tcomp = tcomp
 	this.m_tmproc = tmproc
 	this.m_nreqs = 0
@@ -202,15 +211,17 @@ func (this *DtTileCache) GetObstacleByRef(ref DtObstacleRef) *DtTileCacheObstacl
 }
 
 func (this *DtTileCache) AddTile(data []byte, dataSize int32, flags uint8, result *DtCompressedTileRef) detour.DtStatus {
-	// Make sure the data is in right format.
-	header := (*DtTileCacheLayerHeader)(unsafe.Pointer(&data[0]))
-	if header.Magic != DT_TILECACHE_MAGIC {
-		return detour.DT_FAILURE | detour.DT_WRONG_MAGIC
+	if result != nil {
+		*result = 0
 	}
-	if header.Version != DT_TILECACHE_VERSION {
-		return detour.DT_FAILURE | detour.DT_WRONG_VERSION
+	if this.m_params.MaxTiles <= 0 || int64(dataSize) != int64(len(data)) {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
 	}
-
+	header, status := decodeLayerHeader(data)
+	if detour.DtStatusFailed(status) {
+		return status
+	}
+	data = append([]byte(nil), data...)
 	// Make sure the location is free.
 	if this.GetTileAt(header.Tx, header.Ty, header.Tlayer) != nil {
 		return detour.DT_FAILURE
@@ -235,8 +246,8 @@ func (this *DtTileCache) AddTile(data []byte, dataSize int32, flags uint8, resul
 	this.m_posLookup[h] = tile
 
 	// Init tile.
-	headerSize := int32(detour.DtAlign4(int(DtTileCacheLayerHeaderSize)))
-	tile.Header = (*DtTileCacheLayerHeader)(unsafe.Pointer(&data[0]))
+	headerSize := int32(LayerHeaderSize)
+	tile.Header = header
 	tile.Data = data
 	tile.DataSize = dataSize
 	tile.Compressed = tile.Data[headerSize:]
@@ -322,6 +333,17 @@ func (this *DtTileCache) RemoveTile(ref DtCompressedTileRef, data *[]byte, dataS
 }
 
 func (this *DtTileCache) AddObstacle(pos []float32, radius, height float32, result *DtObstacleRef) detour.DtStatus {
+	if result != nil {
+		*result = 0
+	}
+	if !finite3(pos) || !finite(radius) || radius < 0 || !finite(height) || height < 0 {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+	min, max := [3]float32{pos[0] - radius, pos[1], pos[2] - radius}, [3]float32{pos[0] + radius, pos[1] + height, pos[2] + radius}
+	if status := this.checkObstacleBounds(min[:], max[:]); detour.DtStatusFailed(status) {
+		return status
+	}
+
 	if this.m_nreqs >= MAX_REQUESTS {
 		return detour.DT_FAILURE | detour.DT_BUFFER_TOO_SMALL
 	}
@@ -360,6 +382,13 @@ func (this *DtTileCache) AddObstacle(pos []float32, radius, height float32, resu
 }
 
 func (this *DtTileCache) AddBoxObstacle(bmin, bmax []float32, result *DtObstacleRef) detour.DtStatus {
+	if result != nil {
+		*result = 0
+	}
+	if status := this.checkObstacleBounds(bmin, bmax); detour.DtStatusFailed(status) {
+		return status
+	}
+
 	if this.m_nreqs >= MAX_REQUESTS {
 		return detour.DT_FAILURE | detour.DT_BUFFER_TOO_SMALL
 	}
@@ -396,6 +425,18 @@ func (this *DtTileCache) AddBoxObstacle(bmin, bmax []float32, result *DtObstacle
 }
 
 func (this *DtTileCache) AddBoxObstacle2(center, halfExtents []float32, yRadians float32, result *DtObstacleRef) detour.DtStatus {
+	if result != nil {
+		*result = 0
+	}
+	if !finite3(center) || !finite3(halfExtents) || halfExtents[0] < 0 || halfExtents[1] < 0 || halfExtents[2] < 0 || !finite(yRadians) {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+	r := float32(1.42) * detour.DtMaxFloat32(halfExtents[0], halfExtents[2])
+	min, max := [3]float32{center[0] - r, center[1] - halfExtents[1], center[2] - r}, [3]float32{center[0] + r, center[1] + halfExtents[1], center[2] + r}
+	if status := this.checkObstacleBounds(min[:], max[:]); detour.DtStatusFailed(status) {
+		return status
+	}
+
 	if this.m_nreqs >= MAX_REQUESTS {
 		return detour.DT_FAILURE | detour.DT_BUFFER_TOO_SMALL
 	}
@@ -453,100 +494,46 @@ func (this *DtTileCache) RemoveObstacle(ref DtObstacleRef) detour.DtStatus {
 	return detour.DT_SUCCESS
 }
 
-func (this *DtTileCache) QueryTiles(bmin, bmax []float32,
-	results []DtCompressedTileRef, resultCount *int32, maxResults int32) detour.DtStatus {
-	const MAX_TILES int32 = 32
-	var tiles [MAX_TILES]DtCompressedTileRef
-
-	var n int32
-
-	tw := float32(this.m_params.Width) * this.m_params.Cs
-	th := float32(this.m_params.Height) * this.m_params.Cs
-	tx0 := int32(detour.DtMathFloorf((bmin[0] - this.m_params.Orig[0]) / tw))
-	tx1 := int32(detour.DtMathFloorf((bmax[0] - this.m_params.Orig[0]) / tw))
-	ty0 := int32(detour.DtMathFloorf((bmin[2] - this.m_params.Orig[2]) / th))
-	ty1 := int32(detour.DtMathFloorf((bmax[2] - this.m_params.Orig[2]) / th))
-
-	for ty := ty0; ty <= ty1; ty++ {
-		for tx := tx0; tx <= tx1; tx++ {
-			ntiles := this.GetTilesAt(tx, ty, tiles[:], MAX_TILES)
-
-			for i := int32(0); i < ntiles; i++ {
-				tile := &this.m_tiles[this.DecodeTileIdTile(tiles[i])]
-				var tbmin, tbmax [3]float32
-				this.CalcTightTileBounds(tile.Header, tbmin[:], tbmax[:])
-
-				if detour.DtOverlapBounds(bmin, bmax, tbmin[:], tbmax[:]) {
-					if n < maxResults {
-						results[n] = tiles[i]
-						n++
-					}
-				}
+// QueryTiles reports buffer truncation explicitly and includes every loaded layer.
+func (this *DtTileCache) QueryTiles(bmin, bmax []float32, results []DtCompressedTileRef, resultCount *int32, maxResults int32) detour.DtStatus {
+	if resultCount != nil {
+		*resultCount = 0
+	}
+	if resultCount == nil || !validBounds(bmin, bmax) || maxResults < 0 || int64(maxResults) > int64(len(results)) {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+	status := detour.DT_SUCCESS
+	for i := range this.m_tiles {
+		tile := &this.m_tiles[i]
+		if tile.Header == nil {
+			continue
+		}
+		var min, max [3]float32
+		this.CalcTightTileBounds(tile.Header, min[:], max[:])
+		if detour.DtOverlapBounds(bmin, bmax, min[:], max[:]) {
+			if *resultCount < maxResults {
+				results[*resultCount] = this.GetTileRef(tile)
+				*resultCount++
+			} else {
+				status |= detour.DT_BUFFER_TOO_SMALL
 			}
 		}
 	}
-
-	*resultCount = n
-
-	return detour.DT_SUCCESS
+	return status
 }
 
 func (this *DtTileCache) Update(dt float32, navmesh *detour.DtNavMesh,
 	upToDate *bool) detour.DtStatus {
+	if upToDate != nil {
+		*upToDate = false
+	}
+	if navmesh == nil || this.m_tcomp == nil {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
 	if this.m_nupdate == 0 {
-		// Process requests.
-		for i := int32(0); i < this.m_nreqs; i++ {
-			req := &this.m_reqs[i]
-
-			idx := this.DecodeObstacleIdObstacle(req.ref)
-			if int32(idx) >= this.m_params.MaxObstacles {
-				continue
-			}
-			ob := &this.m_obstacles[idx]
-			salt := this.DecodeObstacleIdSalt(req.ref)
-			if uint32(ob.Salt) != salt {
-				continue
-			}
-
-			if req.action == REQUEST_ADD {
-				// Find touched tiles.
-				var bmin, bmax [3]float32
-				this.GetObstacleBounds(ob, bmin[:], bmax[:])
-
-				var ntouched int32
-				this.QueryTiles(bmin[:], bmax[:], ob.Touched[:], &ntouched, DT_MAX_TOUCHED_TILES)
-				ob.Ntouched = uint8(ntouched)
-				// Add tiles to update list.
-				ob.Npending = 0
-				for j := int32(0); j < int32(ob.Ntouched); j++ {
-					if this.m_nupdate < MAX_UPDATE {
-						if !contains(this.m_update[:], this.m_nupdate, ob.Touched[j]) {
-							this.m_update[this.m_nupdate] = ob.Touched[j]
-							this.m_nupdate++
-						}
-						ob.Pending[ob.Npending] = ob.Touched[j]
-						ob.Npending++
-					}
-				}
-			} else if req.action == REQUEST_REMOVE {
-				// Prepare to remove obstacle.
-				ob.State = DT_OBSTACLE_REMOVING
-				// Add tiles to update list.
-				ob.Npending = 0
-				for j := int32(0); j < int32(ob.Ntouched); j++ {
-					if this.m_nupdate < MAX_UPDATE {
-						if !contains(this.m_update[:], this.m_nupdate, ob.Touched[j]) {
-							this.m_update[this.m_nupdate] = ob.Touched[j]
-							this.m_nupdate++
-						}
-						ob.Pending[ob.Npending] = ob.Touched[j]
-						ob.Npending++
-					}
-				}
-			}
+		if status := this.processObstacleRequests(); detour.DtStatusFailed(status) {
+			return status
 		}
-
-		this.m_nreqs = 0
 	}
 
 	status := detour.DT_SUCCESS
@@ -555,6 +542,9 @@ func (this *DtTileCache) Update(dt float32, navmesh *detour.DtNavMesh,
 		// Build mesh
 		ref := this.m_update[0]
 		status = this.BuildNavMeshTile(ref, navmesh)
+		if detour.DtStatusFailed(status) {
+			return status
+		}
 		this.m_nupdate--
 		if this.m_nupdate > 0 {
 			for i := int32(0); i < this.m_nupdate; i++ {
@@ -618,15 +608,17 @@ func (this *DtTileCache) BuildNavMeshTilesAt(tx, ty int32, navmesh *detour.DtNav
 }
 
 func (this *DtTileCache) BuildNavMeshTile(ref DtCompressedTileRef, navmesh *detour.DtNavMesh) detour.DtStatus {
-	detour.DtAssert(this.m_tcomp != nil)
+	if navmesh == nil || this.m_tcomp == nil || ref == 0 {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
 
 	idx := this.DecodeTileIdTile(ref)
-	if idx > uint32(this.m_params.MaxTiles) {
+	if idx >= uint32(this.m_params.MaxTiles) {
 		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
 	}
 	tile := &this.m_tiles[idx]
 	salt := this.DecodeTileIdSalt(ref)
-	if tile.Salt != salt {
+	if tile.Salt != salt || tile.Header == nil {
 		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
 	}
 
@@ -723,16 +715,9 @@ func (this *DtTileCache) BuildNavMeshTile(ref DtCompressedTileRef, navmesh *deto
 		return detour.DT_FAILURE
 	}
 
-	// Remove existing tile.
-	navmesh.RemoveTile(navmesh.GetTileRefAt(tile.Header.Tx, tile.Header.Ty, tile.Header.Tlayer), nil, nil)
-
-	// Add new tile, or leave the location empty.
+	// Validation precedes replacement; a failed replacement restores the old tile.
 	if navData != nil {
-		// Let the navmesh own the data.
-		status = navmesh.AddTile(navData, navDataSize, detour.DT_TILE_FREE_DATA, 0, nil)
-		if detour.DtStatusFailed(status) {
-			return status
-		}
+		return navmesh.ReplaceTile(navData, navDataSize, detour.DT_TILE_FREE_DATA, nil)
 	}
 
 	return detour.DT_SUCCESS

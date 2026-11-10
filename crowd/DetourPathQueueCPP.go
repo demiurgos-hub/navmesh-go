@@ -22,7 +22,11 @@ import detour "github.com/demiurgos-hub/navmesh-go/detour"
 
 func (this *DtPathQueue) Init(maxPathSize, maxSearchNodeCount int, nav *detour.DtNavMesh) bool {
 
+	if maxPathSize <= 0 || maxSearchNodeCount <= 0 || nav == nil {
+		return false
+	}
 	this.purge()
+	this.m_nextHandle = 1
 
 	this.m_navquery = detour.DtAllocNavMeshQuery()
 	if this.m_navquery == nil {
@@ -101,6 +105,10 @@ func (this *DtPathQueue) Request(startRef, endRef detour.DtPolyRef,
 	startPos, endPos []float32,
 	filter *detour.DtQueryFilter) DtPathQueueRef {
 
+	if this.m_navquery == nil || len(startPos) < 3 || len(endPos) < 3 || filter == nil || !this.m_navquery.GetAttachedNavMesh().IsValidPolyRef(startRef) || !this.m_navquery.GetAttachedNavMesh().IsValidPolyRef(endRef) {
+		return DT_PATHQ_INVALID
+	}
+
 	var slot = -1
 	for i := 0; i < MAX_QUEUE; i += 1 {
 		if this.m_queue[i].ref == DtPathQueueRef(DT_PATHQ_INVALID) {
@@ -127,7 +135,8 @@ func (this *DtPathQueue) Request(startRef, endRef detour.DtPolyRef,
 
 	q.status = 0
 	q.npath = 0
-	q.filter = filter
+	filterCopy := *filter
+	q.filter = &filterCopy
 	q.keepAlive = 0
 
 	return ref
@@ -144,10 +153,23 @@ func (this *DtPathQueue) GetRequestStatus(ref DtPathQueueRef) detour.DtStatus {
 
 func (this *DtPathQueue) GetPathResult(ref DtPathQueueRef, path []detour.DtPolyRef,
 	pathSize *int, maxPath int) detour.DtStatus {
+	if pathSize != nil {
+		*pathSize = 0
+	}
+	if ref == DT_PATHQ_INVALID || pathSize == nil || maxPath < 0 || maxPath > len(path) {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+
 	for i := 0; i < MAX_QUEUE; i += 1 {
 		if this.m_queue[i].ref == ref {
 			var q = &this.m_queue[i]
+			if !detour.DtStatusSucceed(q.status) {
+				return q.status
+			}
 			var details = q.status & detour.DT_STATUS_DETAIL_MASK
+			if q.npath > maxPath {
+				details |= detour.DT_BUFFER_TOO_SMALL
+			}
 			// Free request for reuse.
 			q.ref = DtPathQueueRef(DT_PATHQ_INVALID)
 			q.status = 0

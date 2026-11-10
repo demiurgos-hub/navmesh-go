@@ -1,8 +1,9 @@
 package loader
 
 import (
-	"os"
-	"unsafe"
+	"bytes"
+	"encoding/binary"
+	"fmt"
 
 	detour "github.com/demiurgos-hub/navmesh-go/detour"
 )
@@ -22,44 +23,67 @@ type NavMeshTileHeader struct {
 	dataSize int32
 }
 
-func LoadTileMeshByBytes(data []byte) *detour.DtNavMesh {
-	header := (*NavMeshSetHeader)(unsafe.Pointer(&(data[0])))
-	if header.magic != NAVMESHSET_MAGIC {
-		return nil
+// DecodeTileMesh validates a complete little-endian mesh set before returning it.
+func DecodeTileMesh(data []byte) (*detour.DtNavMesh, error) {
+	if len(data) < 40 || len(data) > MaxMeshSetSize {
+		return nil, fmt.Errorf("loader: invalid mesh-set size")
 	}
-	if header.version != NAVMESHSET_VERSION {
-		return nil
+	r := bytes.NewReader(data)
+	var magic, version, count int32
+	_ = binary.Read(r, binary.LittleEndian, &magic)
+	_ = binary.Read(r, binary.LittleEndian, &version)
+	_ = binary.Read(r, binary.LittleEndian, &count)
+	if magic != NAVMESHSET_MAGIC || version != NAVMESHSET_VERSION || count < 0 {
+		return nil, fmt.Errorf("loader: invalid mesh-set header")
 	}
-
-	var navMesh = detour.DtAllocNavMesh()
-	if navMesh == nil {
-		return nil
+	var params detour.DtNavMeshParams
+	if err := binary.Read(r, binary.LittleEndian, &params); err != nil {
+		return nil, err
 	}
-
-	var status = navMesh.Init(&header.params)
-	if detour.DtStatusFailed(status) {
-		return nil
+	if uint32(count) > params.MaxTiles || int64(count) > int64(r.Len())/8 {
+		return nil, fmt.Errorf("loader: inconsistent tile count")
 	}
-
-	var offset = int32(unsafe.Sizeof(*header))
-	for i := 0; i < int(header.numTiles); i += 1 {
-		var tileHeader = (*NavMeshTileHeader)(unsafe.Pointer(&(data[offset])))
-		if tileHeader.tileRef <= 0 || tileHeader.dataSize <= 0 {
-			break
+	mesh := detour.DtAllocNavMesh()
+	if status := mesh.Init(&params); detour.DtStatusFailed(status) {
+		return nil, fmt.Errorf("loader: mesh initialization failed: %#x", status)
+	}
+	for i := int32(0); i < count; i++ {
+		var ref uint32
+		var size int32
+		if err := binary.Read(r, binary.LittleEndian, &ref); err != nil {
+			return nil, fmt.Errorf("loader: tile %d header: %w", i, err)
 		}
-		offset += int32(unsafe.Sizeof(*tileHeader))
-
-		tileData := data[offset : offset+tileHeader.dataSize]
-		navMesh.AddTile(tileData, int(tileHeader.dataSize), detour.DT_TILE_FREE_DATA, tileHeader.tileRef, nil)
-		offset += tileHeader.dataSize
+		if err := binary.Read(r, binary.LittleEndian, &size); err != nil {
+			return nil, err
+		}
+		if ref == 0 || size <= 0 || int64(size) > int64(r.Len()) || size > detour.MaxTileDataSize {
+			return nil, fmt.Errorf("loader: tile %d length or reference is invalid", i)
+		}
+		offset := len(data) - r.Len()
+		status := mesh.AddTile(data[offset:offset+int(size)], int(size), detour.DT_TILE_FREE_DATA, detour.DtTileRef(ref), nil)
+		if detour.DtStatusFailed(status) {
+			return nil, fmt.Errorf("loader: tile %d failed validation/loading: %#x", i, status)
+		}
+		_, _ = r.Seek(int64(size), 1)
 	}
-
-	return navMesh
+	if r.Len() != 0 {
+		return nil, fmt.Errorf("loader: trailing mesh-set bytes")
+	}
+	return mesh, nil
 }
 
-func LoadTileMesh(path string) *detour.DtNavMesh {
-	meshData, err := os.ReadFile(path)
-	detour.DtAssert(err == nil)
-
-	return LoadTileMeshByBytes(meshData)
+// ReadTileMesh reads and validates a mesh-set file, preserving I/O diagnostics.
+func ReadTileMesh(path string) (*detour.DtNavMesh, error) {
+	data, err := readBoundedFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return DecodeTileMesh(data)
 }
+
+// LoadTileMeshByBytes is the legacy loader; malformed data returns nil.
+// Use DecodeTileMesh when an explanatory error is needed.
+func LoadTileMeshByBytes(data []byte) *detour.DtNavMesh { mesh, _ := DecodeTileMesh(data); return mesh }
+
+// LoadTileMesh is the legacy file loader; I/O or decoding failures return nil.
+func LoadTileMesh(path string) *detour.DtNavMesh { mesh, _ := ReadTileMesh(path); return mesh }

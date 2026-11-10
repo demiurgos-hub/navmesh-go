@@ -22,10 +22,9 @@
 package detour
 
 import (
+	"encoding/binary"
 	"math"
-	"reflect"
 	"sort"
-	"unsafe"
 )
 
 var MESH_NULL_IDX uint16 = 0xffff
@@ -293,30 +292,26 @@ func classifyOffMeshPoint(pt, bmin, bmax []float32) uint8 {
 	return 0xff
 }
 
-/// Builds navigation mesh tile data from the provided tile creation data.
-/// @ingroup detour
-///  @param[in]		params		Tile creation data.
-///  @param[out]	outData		The resulting tile data.
-///  @param[out]	outDataSize	The size of the tile data array.
-/// @return True if the tile data was successfully created.
-/// @par
-///
-/// The output data array is allocated using the detour allocator (dtAlloc()).  The method
-/// used to free the memory will be determined by how the tile is added to the navigation
-/// mesh.
-///
-/// @see dtNavMesh, dtNavMesh::addTile()
+// / Builds navigation mesh tile data from the provided tile creation data.
+// / @ingroup detour
+// /  @param[in]		params		Tile creation data.
+// /  @param[out]	outData		The resulting tile data.
+// /  @param[out]	outDataSize	The size of the tile data array.
+// / @return True if the tile data was successfully created.
+// / @par
+// /
+// / The output data array is allocated using the detour allocator (dtAlloc()).  The method
+// / used to free the memory will be determined by how the tile is added to the navigation
+// / mesh.
+// /
+// / @see dtNavMesh, dtNavMesh::addTile()
 func DtCreateNavMeshData(params *DtNavMeshCreateParams, outData *[]byte, outDataSize *int) bool {
-	if params.Nvp > DT_VERTS_PER_POLYGON {
+	if outData == nil || outDataSize == nil {
 		return false
 	}
-	if params.VertCount >= 0xffff {
-		return false
-	}
-	if params.VertCount == 0 || params.Verts == nil {
-		return false
-	}
-	if params.PolyCount == 0 || params.Polys == nil {
+	*outData = nil
+	*outDataSize = 0
+	if !validCreateParams(params) {
 		return false
 	}
 	nvp := int(params.Nvp)
@@ -446,95 +441,18 @@ func DtCreateNavMeshData(params *DtNavMeshCreateParams, outData *[]byte, outData
 		}
 	}
 
-	// Calculate data size
-	headerSize := DtAlign4(int(unsafe.Sizeof(DtMeshHeader{})))
-	vertsSize := DtAlign4(int(unsafe.Sizeof(float32(1.0))) * 3 * int(totVertCount))
-	polysSize := DtAlign4(int(unsafe.Sizeof(DtPoly{})) * int(totPolyCount))
-	linksSize := DtAlign4(int(unsafe.Sizeof(DtLink{})) * int(maxLinkCount))
-	detailMeshesSize := DtAlign4(int(unsafe.Sizeof(DtPolyDetail{})) * int(params.PolyCount))
-	detailVertsSize := DtAlign4(int(unsafe.Sizeof(float32(1.0))) * 3 * int(uniqueDetailVertCount))
-	detailTrisSize := DtAlign4(int(unsafe.Sizeof(uint8(1))) * 4 * int(detailTriCount))
-	bvTreeSize := 0
-	if params.BuildBvTree {
-		bvTreeSize = DtAlign4(int(unsafe.Sizeof(DtBVNode{})) * int(params.PolyCount*2))
-	}
-	offMeshConsSize := DtAlign4(int(unsafe.Sizeof(DtOffMeshConnection{})) * int(storedOffMeshConCount))
-
-	dataSize := headerSize + vertsSize + polysSize + linksSize +
-		detailMeshesSize + detailVertsSize + detailTrisSize +
-		bvTreeSize + offMeshConsSize
-
-	data := make([]byte, dataSize)
-	if data == nil {
-		offMeshConClass = nil
-		return false
-	}
-
-	d := 0
-
-	header := (*DtMeshHeader)(unsafe.Pointer(&(data[d])))
-	d += headerSize
-
-	var navVerts []float32
-	sliceHeader := (*reflect.SliceHeader)((unsafe.Pointer(&navVerts)))
-	sliceHeader.Cap = 3 * int(totVertCount)
-	sliceHeader.Len = 3 * int(totVertCount)
-	sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-	d += vertsSize
-
-	var navPolys []DtPoly
-	sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&navPolys)))
-	sliceHeader.Cap = int(totPolyCount)
-	sliceHeader.Len = int(totPolyCount)
-	sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-	d += polysSize
-
-	d += linksSize // Ignore links; just leave enough space for them. They'll be created on load.
-
-	var navDMeshes []DtPolyDetail
-	if params.PolyCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&navDMeshes)))
-		sliceHeader.Cap = int(params.PolyCount)
-		sliceHeader.Len = int(params.PolyCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += detailMeshesSize
-	}
-
-	var navDVerts []float32
-	if uniqueDetailVertCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&navDVerts)))
-		sliceHeader.Cap = 3 * int(uniqueDetailVertCount)
-		sliceHeader.Len = 3 * int(uniqueDetailVertCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += detailVertsSize
-	}
-
-	var navDTris []uint8
-	if detailTriCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&navDTris)))
-		sliceHeader.Cap = 4 * int(detailTriCount)
-		sliceHeader.Len = 4 * int(detailTriCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += detailTrisSize
-	}
-
+	// Build typed Go arrays; serialization uses an explicit wire layout.
+	header := new(DtMeshHeader)
+	navVerts := make([]float32, totVertCount*3)
+	navPolys := make([]DtPoly, totPolyCount)
+	navDMeshes := make([]DtPolyDetail, params.PolyCount)
+	navDVerts := make([]float32, uniqueDetailVertCount*3)
+	navDTris := make([]byte, detailTriCount*4)
 	var navBvtree []DtBVNode
-	if params.BuildBvTree && params.PolyCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&navBvtree)))
-		sliceHeader.Cap = int(params.PolyCount * 2)
-		sliceHeader.Len = int(params.PolyCount * 2)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += bvTreeSize
+	if params.BuildBvTree {
+		navBvtree = make([]DtBVNode, params.PolyCount*2)
 	}
-
-	var offMeshCons []DtOffMeshConnection
-	if storedOffMeshConCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&offMeshCons)))
-		sliceHeader.Cap = int(storedOffMeshConCount)
-		sliceHeader.Len = int(storedOffMeshConCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += offMeshConsSize
-	}
+	offMeshCons := make([]DtOffMeshConnection, storedOffMeshConCount)
 
 	// Store header
 	header.Magic = DT_NAVMESH_MAGIC
@@ -727,195 +645,96 @@ func DtCreateNavMeshData(params *DtNavMeshCreateParams, outData *[]byte, outData
 
 	offMeshConClass = nil
 
+	data, err := EncodeNavMeshData(&DtMeshTile{Header: header, Verts: navVerts, Polys: navPolys, DetailMeshes: navDMeshes, DetailVerts: navDVerts, DetailTris: navDTris, BvTree: navBvtree, OffMeshCons: offMeshCons})
+	if err != nil {
+		return false
+	}
 	*outData = data
-	*outDataSize = dataSize
+	*outDataSize = len(data)
 
 	return true
 }
 
-/// Swaps the endianess of the tile data's header (#dtMeshHeader).
-///  @param[in,out]	data		The tile data array.
-///  @param[in]		dataSize	The size of the data array.
-func DtNavMeshHeaderSwapEndian(data []byte, _ int /*dataSize*/) bool {
-	header := (*DtMeshHeader)(unsafe.Pointer(&(data[0])))
-
-	swappedMagic := DT_NAVMESH_MAGIC
-	swappedVersion := DT_NAVMESH_VERSION
-	DtSwapEndianInt32(&swappedMagic)
-	DtSwapEndianInt32(&swappedVersion)
-
-	if (header.Magic != DT_NAVMESH_MAGIC || header.Version != DT_NAVMESH_VERSION) &&
-		(header.Magic != swappedMagic || header.Version != swappedVersion) {
+// / Swaps the endianess of the tile data's header (#dtMeshHeader).
+// /  @param[in,out]	data		The tile data array.
+// /  @param[in]		dataSize	The size of the data array.
+func DtNavMeshHeaderSwapEndian(data []byte, dataSize int) bool {
+	if dataSize < NavMeshHeaderSize || dataSize > len(data) {
 		return false
 	}
-
-	DtSwapEndianInt32(&header.Magic)
-	DtSwapEndianInt32(&header.Version)
-	DtSwapEndianInt32(&header.X)
-	DtSwapEndianInt32(&header.Y)
-	DtSwapEndianInt32(&header.Layer)
-	DtSwapEndianUInt32(&header.UserId)
-	DtSwapEndianInt32(&header.PolyCount)
-	DtSwapEndianInt32(&header.VertCount)
-	DtSwapEndianInt32(&header.MaxLinkCount)
-	DtSwapEndianInt32(&header.DetailMeshCount)
-	DtSwapEndianInt32(&header.DetailVertCount)
-	DtSwapEndianInt32(&header.DetailTriCount)
-	DtSwapEndianInt32(&header.BvNodeCount)
-	DtSwapEndianInt32(&header.OffMeshConCount)
-	DtSwapEndianInt32(&header.OffMeshBase)
-	DtSwapEndianFloat32(&header.WalkableHeight)
-	DtSwapEndianFloat32(&header.WalkableRadius)
-	DtSwapEndianFloat32(&header.WalkableClimb)
-	DtSwapEndianFloat32(&header.Bmin[0])
-	DtSwapEndianFloat32(&header.Bmin[1])
-	DtSwapEndianFloat32(&header.Bmin[2])
-	DtSwapEndianFloat32(&header.Bmax[0])
-	DtSwapEndianFloat32(&header.Bmax[1])
-	DtSwapEndianFloat32(&header.Bmax[2])
-	DtSwapEndianFloat32(&header.BvQuantFactor)
-
-	// Freelist index and pointers are updated when tile is added, no need to swap.
-
+	le, be := binary.LittleEndian, binary.BigEndian
+	if !(le.Uint32(data) == uint32(DT_NAVMESH_MAGIC) && le.Uint32(data[4:]) == uint32(DT_NAVMESH_VERSION)) && !(be.Uint32(data) == uint32(DT_NAVMESH_MAGIC) && be.Uint32(data[4:]) == uint32(DT_NAVMESH_VERSION)) {
+		return false
+	}
+	for i := 0; i < NavMeshHeaderSize; i += 4 {
+		reverse4(data[i:])
+	}
 	return true
 }
 
-/// Swaps endianess of the tile data.
-///  @param[in,out]	data		The tile data array.
-///  @param[in]		dataSize	The size of the data array.
-/// @par
-///
-/// @warning This function assumes that the header is in the correct endianess already.
-/// Call #dtNavMeshHeaderSwapEndian() first on the data if the data is expected to be in wrong endianess
-/// to start with. Call #dtNavMeshHeaderSwapEndian() after the data has been swapped if converting from
-/// native to foreign endianess.
-func DtNavMeshDataSwapEndian(data []byte, _ int /*dataSize*/) bool {
-	// Make sure the data is in right format.
-	header := (*DtMeshHeader)(unsafe.Pointer(&(data[0])))
-	if header.Magic != DT_NAVMESH_MAGIC {
+// / Swaps endianess of the tile data.
+// /  @param[in,out]	data		The tile data array.
+// /  @param[in]		dataSize	The size of the data array.
+// / @par
+// /
+// / @warning This function assumes that the header is in the correct endianess already.
+// / Call #dtNavMeshHeaderSwapEndian() first on the data if the data is expected to be in wrong endianess
+// / to start with. Call #dtNavMeshHeaderSwapEndian() after the data has been swapped if converting from
+// / native to foreign endianess.
+func DtNavMeshDataSwapEndian(data []byte, dataSize int) bool {
+	if dataSize < NavMeshHeaderSize || dataSize > len(data) {
 		return false
 	}
-	if header.Version != DT_NAVMESH_VERSION {
+	h, err := tileHeader(data[:dataSize])
+	if err != nil {
 		return false
 	}
-	// Patch header pointers.
-	headerSize := DtAlign4(int(unsafe.Sizeof(DtMeshHeader{})))
-	vertsSize := DtAlign4(int(unsafe.Sizeof(float32(1.0))) * 3 * int(header.VertCount))
-	polysSize := DtAlign4(int(unsafe.Sizeof(DtPoly{})) * int(header.PolyCount))
-	linksSize := DtAlign4(int(unsafe.Sizeof(DtLink{})) * int(header.MaxLinkCount))
-	detailMeshesSize := DtAlign4(int(unsafe.Sizeof(DtPolyDetail{})) * int(header.DetailMeshCount))
-	detailVertsSize := DtAlign4(int(unsafe.Sizeof(float32(1.0))) * 3 * int(header.DetailVertCount))
-	detailTrisSize := DtAlign4(int(unsafe.Sizeof(uint8(1))) * 4 * int(header.DetailTriCount))
-	bvtreeSize := DtAlign4(int(unsafe.Sizeof(DtBVNode{})) * int(header.BvNodeCount))
-	offMeshLinksSize := DtAlign4(int(unsafe.Sizeof(DtOffMeshConnection{})) * int(header.OffMeshConCount))
-
-	d := 0 + headerSize
-
-	var verts []float32
-	sliceHeader := (*reflect.SliceHeader)((unsafe.Pointer(&verts)))
-	sliceHeader.Cap = 3 * int(header.VertCount)
-	sliceHeader.Len = 3 * int(header.VertCount)
-	sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-	d += vertsSize
-
-	var polys []DtPoly
-	sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&polys)))
-	sliceHeader.Cap = int(header.PolyCount)
-	sliceHeader.Len = int(header.PolyCount)
-	sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-	d += polysSize
-
-	d += linksSize // Ignore links; they technically should be endian-swapped but all their data is overwritten on load anyway.
-	//dtLink* links = dtGetThenAdvanceBufferPointer<dtLink>(d, linksSize);
-
-	var detailMeshes []DtPolyDetail
-	if header.DetailMeshCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&detailMeshes)))
-		sliceHeader.Cap = int(header.DetailMeshCount)
-		sliceHeader.Len = int(header.DetailMeshCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += detailMeshesSize
+	size, err := tileEncodedSize(&h)
+	if err != nil || size != dataSize {
+		return false
 	}
-
-	var detailVerts []float32
-	if header.DetailVertCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&detailVerts)))
-		sliceHeader.Cap = 3 * int(header.DetailVertCount)
-		sliceHeader.Len = 3 * int(header.DetailVertCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += detailVertsSize
+	offset := NavMeshHeaderSize
+	for i := 0; i < int(h.VertCount)*3; i++ {
+		reverse4(data[offset:])
+		offset += 4
 	}
-
-	d += detailTrisSize // Ignore detail tris; single bytes can't be endian-swapped.
-	//unsigned char* detailTris = dtGetThenAdvanceBufferPointer<unsigned char>(d, detailTrisSize);
-
-	var bvTree []DtBVNode
-	if header.BvNodeCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&bvTree)))
-		sliceHeader.Cap = int(header.BvNodeCount)
-		sliceHeader.Len = int(header.BvNodeCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += bvtreeSize
-	}
-
-	var offMeshCons []DtOffMeshConnection
-	if header.OffMeshConCount != 0 {
-		sliceHeader = (*reflect.SliceHeader)((unsafe.Pointer(&offMeshCons)))
-		sliceHeader.Cap = int(header.OffMeshConCount)
-		sliceHeader.Len = int(header.OffMeshConCount)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&(data[d])))
-		d += offMeshLinksSize
-	}
-
-	// Vertices
-	for i := 0; i < int(header.VertCount*3); i++ {
-		DtSwapEndianFloat32(&verts[i])
-	}
-
-	// Polys
-	for i := 0; i < int(header.PolyCount); i++ {
-		p := &polys[i]
-		// poly->firstLink is update when tile is added, no need to swap.
-		for j := 0; j < int(DT_VERTS_PER_POLYGON); j++ {
-			DtSwapEndianUInt16(&p.Verts[j])
-			DtSwapEndianUInt16(&p.Neis[j])
+	for i := 0; i < int(h.PolyCount); i++ {
+		p := data[offset:]
+		reverse4(p)
+		for j := 4; j < 30; j += 2 {
+			p[j], p[j+1] = p[j+1], p[j]
 		}
-		DtSwapEndianUInt16(&p.Flags)
+		offset += 32
 	}
-
-	// Links are rebuild when tile is added, no need to swap.
-
-	// Detail meshes
-	for i := 0; i < int(header.DetailMeshCount); i++ {
-		pd := &detailMeshes[i]
-		DtSwapEndianUInt32(&pd.VertBase)
-		DtSwapEndianUInt32(&pd.TriBase)
+	offset += int(h.MaxLinkCount) * 12
+	for i := 0; i < int(h.DetailMeshCount); i++ {
+		reverse4(data[offset:])
+		reverse4(data[offset+4:])
+		offset += 12
 	}
-
-	// Detail verts
-	for i := 0; i < int(header.DetailVertCount*3); i++ {
-		DtSwapEndianFloat32(&detailVerts[i])
+	for i := 0; i < int(h.DetailVertCount)*3; i++ {
+		reverse4(data[offset:])
+		offset += 4
 	}
-
-	// BV-tree
-	for i := 0; i < int(header.BvNodeCount); i++ {
-		node := &bvTree[i]
-		for j := 0; j < 3; j++ {
-			DtSwapEndianUInt16(&node.Bmin[j])
-			DtSwapEndianUInt16(&node.Bmax[j])
+	offset += int(h.DetailTriCount) * 4
+	for i := 0; i < int(h.BvNodeCount); i++ {
+		p := data[offset:]
+		for j := 0; j < 12; j += 2 {
+			p[j], p[j+1] = p[j+1], p[j]
 		}
-		DtSwapEndianInt32(&node.I)
+		reverse4(p[12:])
+		offset += 16
 	}
-
-	// Off-mesh Connections.
-	for i := 0; i < int(header.OffMeshConCount); i++ {
-		con := &offMeshCons[i]
-		for j := 0; j < 6; j++ {
-			DtSwapEndianFloat32(&con.Pos[j])
+	for i := 0; i < int(h.OffMeshConCount); i++ {
+		p := data[offset:]
+		for j := 0; j < 28; j += 4 {
+			reverse4(p[j:])
 		}
-		DtSwapEndianFloat32(&con.Rad)
-		DtSwapEndianUInt16(&con.Poly)
+		p[28], p[29] = p[29], p[28]
+		reverse4(p[32:])
+		offset += 36
 	}
-
 	return true
 }
+
+func reverse4(b []byte) { b[0], b[3] = b[3], b[0]; b[1], b[2] = b[2], b[1] }

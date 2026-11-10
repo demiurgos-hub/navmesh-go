@@ -82,9 +82,9 @@ func (this *DtNodePool) GetNodeAtIdx(idx uint32) *DtNode {
 
 func (this *DtNodePool) GetMemUsed() uint32 {
 	return uint32(unsafe.Sizeof(*this)) +
-		uint32(unsafe.Sizeof(&this.m_nodes[0]))*this.m_maxNodes +
-		uint32(unsafe.Sizeof(&this.m_next[0]))*this.m_maxNodes +
-		uint32(unsafe.Sizeof(&this.m_first[0]))*this.m_hashSize
+		uint32(unsafe.Sizeof(DtNode{}))*this.m_maxNodes +
+		uint32(unsafe.Sizeof(DtNodeIndex(0)))*this.m_maxNodes +
+		uint32(unsafe.Sizeof(DtNodeIndex(0)))*this.m_hashSize
 }
 
 func (this *DtNodePool) GetMaxNodes() uint32             { return this.m_maxNodes }

@@ -128,6 +128,11 @@ func (this *DtNavMeshQuery) destructor() {
 // /
 // / This function can be used multiple times.
 func (this *DtNavMeshQuery) Init(nav *DtNavMesh, maxNodes int) DtStatus {
+	if nav == nil || nav.m_maxTiles <= 0 || maxNodes <= 0 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+	this.m_query = dtQueryData{}
+
 	if maxNodes > int(DT_NULL_IDX) || maxNodes > int((1<<DT_NODE_PARENT_BITS)-1) {
 		return DT_FAILURE | DT_INVALID_PARAM
 	}
@@ -138,7 +143,7 @@ func (this *DtNavMeshQuery) Init(nav *DtNavMesh, maxNodes int) DtStatus {
 			DtFreeNodePool(this.m_nodePool)
 			this.m_nodePool = nil
 		}
-		this.m_nodePool = DtAllocNodePool(uint32(maxNodes), DtNextPow2(uint32(maxNodes/4)))
+		this.m_nodePool = DtAllocNodePool(uint32(maxNodes), DtMaxUInt32(1, DtNextPow2(uint32(maxNodes/4))))
 		if this.m_nodePool == nil {
 			return DT_FAILURE | DT_OUT_OF_MEMORY
 		}
@@ -468,6 +473,10 @@ func (this *DtNavMeshQuery) FindRandomPointAroundCircle(startRef DtPolyRef, cent
 // / See closestPointOnPolyBoundary() for a limited but faster option.
 // /
 func (this *DtNavMeshQuery) ClosestPointOnPoly(ref DtPolyRef, pos, closest []float32, posOverPoly *bool) DtStatus {
+	if !this.ready() || !finite3(pos) || len(closest) < 3 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	DtAssert(this.m_nav != nil)
 	var tile *DtMeshTile
 	var poly *DtPoly
@@ -573,6 +582,10 @@ func (this *DtNavMeshQuery) ClosestPointOnPoly(ref DtPolyRef, pos, closest []flo
 // / @p pos does not have to be within the bounds of the polybon or the navigation mesh.
 // /
 func (this *DtNavMeshQuery) ClosestPointOnPolyBoundary(ref DtPolyRef, pos, closest []float32) DtStatus {
+	if !this.ready() || !finite3(pos) || len(closest) < 3 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	DtAssert(this.m_nav != nil)
 	var tile *DtMeshTile
 	var poly *DtPoly
@@ -623,6 +636,10 @@ func (this *DtNavMeshQuery) ClosestPointOnPolyBoundary(ref DtPolyRef, pos, close
 // / of the polygon.
 // /
 func (this *DtNavMeshQuery) GetPolyHeight(ref DtPolyRef, pos []float32, height *float32) DtStatus {
+	if !this.ready() || !finite3(pos) {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	DtAssert(this.m_nav != nil)
 
 	var tile *DtMeshTile
@@ -748,6 +765,13 @@ func (this *dtFindNearestPolyQuery) Process(tile *DtMeshTile, polys []*DtPoly, r
 func (this *DtNavMeshQuery) FindNearestPoly(center, halfExtents []float32,
 	filter *DtQueryFilter,
 	nearestRef *DtPolyRef, nearestPt []float32) DtStatus {
+	if nearestRef != nil {
+		*nearestRef = 0
+	}
+	if !this.ready() || !finite3(center) || !validExtents(halfExtents) || !validFilter(filter) || nearestRef == nil || nearestPt != nil && len(nearestPt) < 3 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	DtAssert(this.m_nav != nil)
 
 	if nearestRef == nil {
@@ -934,6 +958,13 @@ func (this *dtCollectPolysQuery) Process(tile *DtMeshTile, polys []*DtPoly, refs
 func (this *DtNavMeshQuery) QueryPolygons(center, halfExtents []float32,
 	filter *DtQueryFilter,
 	polys []DtPolyRef, polyCount *int, maxPolys int) DtStatus {
+	if polyCount != nil {
+		*polyCount = 0
+	}
+	if !this.ready() || maxPolys > len(polys) {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	if polys == nil || polyCount == nil || maxPolys < 0 {
 		return DT_FAILURE | DT_INVALID_PARAM
 	}
@@ -971,6 +1002,12 @@ func (this *DtNavMeshQuery) QueryPolygons(center, halfExtents []float32,
 // /
 func (this *DtNavMeshQuery) QueryPolygons2(center, halfExtents []float32,
 	filter *DtQueryFilter, query DtPolyQuery) DtStatus {
+	if !this.ready() || !finite3(center) || !validExtents(halfExtents) || !validFilter(filter) || query == nil || this.m_inPolyQuery {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+	this.m_inPolyQuery = true
+	defer func() { this.m_inPolyQuery = false }()
+
 	DtAssert(this.m_nav != nil)
 
 	if center == nil || halfExtents == nil || filter == nil || query == nil {
@@ -980,17 +1017,29 @@ func (this *DtNavMeshQuery) QueryPolygons2(center, halfExtents []float32,
 	DtVsub(bmin[:], center, halfExtents)
 	DtVadd(bmax[:], center, halfExtents)
 
-	// Find tiles the query touches.
-	var minx, miny, maxx, maxy int32
-	this.m_nav.CalcTileLoc(bmin[:], &minx, &miny)
-	this.m_nav.CalcTileLoc(bmax[:], &maxx, &maxy)
+	// Bound the work and integer conversion before enumerating a search box.
+	coords := [4]float64{
+		math.Floor((float64(bmin[0]) - float64(this.m_nav.m_orig[0])) / float64(this.m_nav.m_tileWidth)),
+		math.Floor((float64(bmin[2]) - float64(this.m_nav.m_orig[2])) / float64(this.m_nav.m_tileHeight)),
+		math.Floor((float64(bmax[0]) - float64(this.m_nav.m_orig[0])) / float64(this.m_nav.m_tileWidth)),
+		math.Floor((float64(bmax[2]) - float64(this.m_nav.m_orig[2])) / float64(this.m_nav.m_tileHeight)),
+	}
+	for _, c := range coords {
+		if math.IsNaN(c) || math.IsInf(c, 0) || c < math.MinInt32 || c > math.MaxInt32 {
+			return DT_FAILURE | DT_INVALID_PARAM
+		}
+	}
+	minx, miny, maxx, maxy := int64(coords[0]), int64(coords[1]), int64(coords[2]), int64(coords[3])
+	if maxx-minx > 1<<20 || maxy-miny > 1<<20 || (maxx-minx+1)*(maxy-miny+1) > 1<<20 {
+		return DT_FAILURE | DT_OUT_OF_NODES
+	}
 
 	const MAX_NEIS int = 32
 	var neis [MAX_NEIS]*DtMeshTile
 
 	for y := miny; y <= maxy; y++ {
 		for x := minx; x <= maxx; x++ {
-			nneis := this.m_nav.GetTilesAt(x, y, neis[:], MAX_NEIS)
+			nneis := this.m_nav.GetTilesAt(int32(x), int32(y), neis[:], MAX_NEIS)
 			for j := 0; j < nneis; j++ {
 				this.queryPolygonsInTile(neis[j], bmin[:], bmax[:], filter, query)
 			}
@@ -1025,6 +1074,13 @@ func (this *DtNavMeshQuery) FindPath(startRef, endRef DtPolyRef,
 	startPos, endPos []float32,
 	filter *DtQueryFilter,
 	path []DtPolyRef, pathCount *int, maxPath int) DtStatus {
+	if pathCount != nil {
+		*pathCount = 0
+	}
+	if !this.ready() || !finite3(startPos) || !finite3(endPos) || !validFilter(filter) || maxPath > len(path) {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	DtAssert(this.m_nav != nil)
 	DtAssert(this.m_nodePool != nil)
 	DtAssert(this.m_openList != nil)
@@ -1252,6 +1308,10 @@ func (this *DtNavMeshQuery) getPathToNode(endNode *DtNode, path []DtPolyRef, pat
 func (this *DtNavMeshQuery) InitSlicedFindPath(startRef, endRef DtPolyRef,
 	startPos, endPos []float32,
 	filter *DtQueryFilter, options DtFindPathOptions) DtStatus {
+	if !this.ready() || !finite3(startPos) || !finite3(endPos) || !validFilter(filter) {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	DtAssert(this.m_nav != nil)
 	DtAssert(this.m_nodePool != nil)
 	DtAssert(this.m_openList != nil)
@@ -1312,6 +1372,13 @@ func (this *DtNavMeshQuery) InitSlicedFindPath(startRef, endRef DtPolyRef,
 // /  @param[out]	doneIters	The actual number of iterations completed. [opt]
 // / @returns The status flags for the query.
 func (this *DtNavMeshQuery) UpdateSlicedFindPath(maxIter int, doneIters *int) DtStatus {
+	if doneIters != nil {
+		*doneIters = 0
+	}
+	if !this.ready() || maxIter < 0 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	if !DtStatusInProgress(this.m_query.status) {
 		return this.m_query.status
 	}
@@ -1523,6 +1590,13 @@ func (this *DtNavMeshQuery) UpdateSlicedFindPath(maxIter int, doneIters *int) Dt
 // /  @param[in]		maxPath		The max number of polygons the path array can hold. [Limit: >= 1]
 // / @returns The status flags for the query.
 func (this *DtNavMeshQuery) FinalizeSlicedFindPath(path []DtPolyRef, pathCount *int, maxPath int) DtStatus {
+	if pathCount != nil {
+		*pathCount = 0
+	}
+	if !this.ready() || pathCount == nil || maxPath <= 0 || maxPath > len(path) || this.m_query.status == 0 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	*pathCount = 0
 
 	if DtStatusFailed(this.m_query.status) {
@@ -1576,7 +1650,7 @@ func (this *DtNavMeshQuery) FinalizeSlicedFindPath(path []DtPolyRef, pathCount *
 			} else {
 				path[n] = node.Id
 				n++
-				if n >= maxPath {
+				if n >= maxPath && next != nil {
 					status = DT_BUFFER_TOO_SMALL
 				}
 			}
@@ -1609,6 +1683,13 @@ func (this *DtNavMeshQuery) FinalizeSlicedFindPath(path []DtPolyRef, pathCount *
 // / @returns The status flags for the query.
 func (this *DtNavMeshQuery) FinalizeSlicedFindPathPartial(existing []DtPolyRef, existingSize int,
 	path []DtPolyRef, pathCount *int, maxPath int) DtStatus {
+	if pathCount != nil {
+		*pathCount = 0
+	}
+	if !this.ready() || pathCount == nil || maxPath <= 0 || maxPath > len(path) || existingSize <= 0 || existingSize > len(existing) || this.m_query.status == 0 {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	*pathCount = 0
 
 	if existingSize == 0 {
@@ -1676,7 +1757,7 @@ func (this *DtNavMeshQuery) FinalizeSlicedFindPathPartial(existing []DtPolyRef, 
 			} else {
 				path[n] = node.Id
 				n++
-				if n >= maxPath {
+				if n >= maxPath && next != nil {
 					status = DT_BUFFER_TOO_SMALL
 				}
 			}
@@ -1816,6 +1897,13 @@ func (this *DtNavMeshQuery) FindStraightPath(startPos, endPos []float32,
 	path []DtPolyRef, pathSize int,
 	straightPath []float32, straightPathFlags []DtStraightPathFlags, straightPathRefs []DtPolyRef,
 	straightPathCount *int, maxStraightPath int, options DtStraightPathOptions) DtStatus {
+	if straightPathCount != nil {
+		*straightPathCount = 0
+	}
+	if !this.ready() || !finite3(startPos) || !finite3(endPos) || pathSize <= 0 || pathSize > len(path) || straightPathCount == nil || maxStraightPath <= 0 || maxStraightPath > len(straightPath)/3 || straightPathFlags != nil && maxStraightPath > len(straightPathFlags) || straightPathRefs != nil && maxStraightPath > len(straightPathRefs) {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	DtAssert(this.m_nav != nil)
 
 	*straightPathCount = 0
@@ -2073,6 +2161,13 @@ func (this *DtNavMeshQuery) MoveAlongSurface(startRef DtPolyRef, startPos, endPo
 	filter *DtQueryFilter,
 	resultPos []float32, visited []DtPolyRef, visitedCount *int, maxVisitedSize int,
 	bHit *bool) DtStatus {
+	if visitedCount != nil {
+		*visitedCount = 0
+	}
+	if !this.ready() || !finite3(startPos) || !finite3(endPos) || !validFilter(filter) || len(resultPos) < 3 || visitedCount == nil || maxVisitedSize <= 0 || maxVisitedSize > len(visited) || bHit == nil {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	DtAssert(this.m_nav != nil)
 	DtAssert(this.m_tinyNodePool != nil)
 
@@ -2163,6 +2258,8 @@ func (this *DtNavMeshQuery) MoveAlongSurface(startRef DtPolyRef, startPos, endPo
 								if nneis < MAX_NEIS {
 									neis[nneis] = link.Ref
 									nneis++
+								} else {
+									status |= DT_OUT_OF_NODES
 								}
 							}
 						}
@@ -2196,6 +2293,7 @@ func (this *DtNavMeshQuery) MoveAlongSurface(startRef DtPolyRef, startPos, endPo
 					// Skip if no node can be allocated.
 					neighbourNode := this.m_tinyNodePool.GetNode(neis[k], 0)
 					if neighbourNode == nil {
+						status |= DT_OUT_OF_NODES
 						continue
 					}
 					// Skip if already visited.
@@ -2217,6 +2315,8 @@ func (this *DtNavMeshQuery) MoveAlongSurface(startRef DtPolyRef, startPos, endPo
 						neighbourNode.Flags |= DT_NODE_CLOSED
 						stack[nstack] = neighbourNode
 						nstack++
+					} else {
+						status |= DT_OUT_OF_NODES
 					}
 				}
 			}
@@ -2422,6 +2522,13 @@ func (this *DtNavMeshQuery) getEdgeMidPoint2(from DtPolyRef, fromPoly *DtPoly, f
 func (this *DtNavMeshQuery) Raycast(startRef DtPolyRef, startPos, endPos []float32,
 	filter *DtQueryFilter,
 	t *float32, hitNormal []float32, path []DtPolyRef, pathCount *int, maxPath int) DtStatus {
+	if pathCount != nil {
+		*pathCount = 0
+	}
+	if t == nil || hitNormal != nil && len(hitNormal) < 3 || maxPath < 0 || maxPath > len(path) {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	var hit DtRaycastHit
 	hit.Path = path
 	hit.MaxPath = int32(maxPath)
@@ -2490,9 +2597,14 @@ func (this *DtNavMeshQuery) Raycast(startRef DtPolyRef, startPos, endPos []float
 func (this *DtNavMeshQuery) Raycast2(startRef DtPolyRef, startPos, endPos []float32,
 	filter *DtQueryFilter, options DtRaycastOptions,
 	hit *DtRaycastHit, prevRef DtPolyRef) DtStatus {
+	if !this.ready() || !finite3(startPos) || !finite3(endPos) || !validFilter(filter) || hit == nil || hit.MaxPath < 0 || int64(hit.MaxPath) > int64(len(hit.Path)) {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
+
 	DtAssert(this.m_nav != nil)
 
 	hit.T = 0
+	hit.LastRef = 0
 	hit.PathCount = 0
 	hit.PathCost = 0
 
@@ -2522,14 +2634,32 @@ func (this *DtNavMeshQuery) Raycast2(startRef DtPolyRef, startPos, endPos []floa
 	tile = nil
 	poly = nil
 	this.m_nav.GetTileAndPolyByRefUnsafe(curRef, &tile, &poly)
+	if poly.GetType() != DT_POLYTYPE_GROUND {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
 	nextTile = tile
 	prevTile = tile
 	nextPoly = poly
 	prevPoly = poly
 	if prevRef != 0 {
-		this.m_nav.GetTileAndPolyByRefUnsafe(prevRef, &prevTile, &prevPoly)
+		if DtStatusFailed(this.m_nav.GetTileAndPolyByRef(prevRef, &prevTile, &prevPoly)) {
+			return DT_FAILURE | DT_INVALID_PARAM
+		}
 	}
+	// A straight walkability ray cannot revisit a convex ground polygon.
+	// Bound both malformed runtime graphs and work across unusually long rays.
+	const maxRaycastPolygons = 65536
+	visited := make(map[DtPolyRef]struct{})
 	for curRef != 0 {
+		if _, repeated := visited[curRef]; repeated {
+			hit.PathCount = int32(n)
+			return DT_FAILURE | DT_INVALID_PARAM
+		}
+		if len(visited) >= maxRaycastPolygons {
+			hit.PathCount = int32(n)
+			return status | DT_PARTIAL_RESULT | DT_OUT_OF_NODES
+		}
+		visited[curRef] = struct{}{}
 		// Cast ray against current polygon.
 
 		// Collect vertices.
@@ -2546,6 +2676,7 @@ func (this *DtNavMeshQuery) Raycast2(startRef DtPolyRef, startPos, endPos []floa
 			hit.PathCount = int32(n)
 			return status
 		}
+		hit.LastRef = curRef
 
 		hit.HitEdgeIndex = int32(segMax)
 
@@ -2575,7 +2706,13 @@ func (this *DtNavMeshQuery) Raycast2(startRef DtPolyRef, startPos, endPos []floa
 		// Follow neighbours.
 		var nextRef DtPolyRef
 
+		linkSteps := 0
 		for i := poly.FirstLink; i != DT_NULL_LINK; i = tile.Links[i].Next {
+			if uint64(i) >= uint64(len(tile.Links)) || linkSteps >= len(tile.Links) {
+				hit.PathCount = int32(n)
+				return DT_FAILURE | DT_INVALID_PARAM
+			}
+			linkSteps++
 			link := &tile.Links[i]
 
 			// Find link which contains this edge.
@@ -2585,7 +2722,10 @@ func (this *DtNavMeshQuery) Raycast2(startRef DtPolyRef, startPos, endPos []floa
 			// Get pointer to the next polygon.
 			nextTile = nil
 			nextPoly = nil
-			this.m_nav.GetTileAndPolyByRefUnsafe(link.Ref, &nextTile, &nextPoly)
+			if DtStatusFailed(this.m_nav.GetTileAndPolyByRef(link.Ref, &nextTile, &nextPoly)) {
+				hit.PathCount = int32(n)
+				return DT_FAILURE | DT_INVALID_PARAM
+			}
 
 			// Skip off-mesh connections.
 			if nextPoly.GetType() == DT_POLYTYPE_OFFMESH_CONNECTION {

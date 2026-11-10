@@ -1,9 +1,9 @@
 package loader
 
 import (
-	"os"
-	"reflect"
-	"unsafe"
+	"bytes"
+	"encoding/binary"
+	"fmt"
 
 	detour "github.com/demiurgos-hub/navmesh-go/detour"
 	"github.com/demiurgos-hub/navmesh-go/fastlz"
@@ -28,20 +28,50 @@ type TileCacheTileHeader struct {
 
 type FastLZCompressor struct{}
 
+// MaxCompressedSize returns a safe FastLZ output bound.
 func (c *FastLZCompressor) MaxCompressedSize(bufferSize int32) int32 {
-	return int32(float64(bufferSize) * 1.05)
+	if bufferSize < 0 {
+		return 0
+	}
+	n := fastlz.MaxCompressedSize(int(bufferSize))
+	if n > 1<<30 {
+		return 0
+	}
+	return int32(n)
 }
+
+// Compress validates the declared capacities and reports compression failures.
 func (c *FastLZCompressor) Compress(buffer []byte, bufferSize int32, compressed []byte, maxCompressedSize int32, compressedSize *int32) detour.DtStatus {
-	*compressedSize = int32(fastlz.Fastlz_compress(buffer, int(bufferSize), compressed))
+	if compressedSize == nil {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+	*compressedSize = 0
+	if bufferSize <= 0 || int64(bufferSize) > int64(len(buffer)) || maxCompressedSize < 0 || int64(maxCompressedSize) > int64(len(compressed)) {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+	n := fastlz.Fastlz_compress(buffer, int(bufferSize), compressed[:maxCompressedSize])
+	if n <= 0 {
+		return detour.DT_FAILURE
+	}
+	*compressedSize = int32(n)
 	return detour.DT_SUCCESS
 }
+
+// Decompress rejects corrupt streams, including FastLZ's zero-length failure result.
 func (c *FastLZCompressor) Decompress(compressed []byte, compressedSize int32, buffer []byte, maxBufferSize int32, bufferSize *int32) detour.DtStatus {
-	*bufferSize = int32(fastlz.Fastlz_decompress(compressed, int(compressedSize), buffer, int(maxBufferSize)))
-	if *bufferSize < 0 {
-		return detour.DT_FAILURE
-	} else {
-		return detour.DT_SUCCESS
+	if bufferSize == nil {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
 	}
+	*bufferSize = 0
+	if compressedSize <= 0 || int64(compressedSize) > int64(len(compressed)) || maxBufferSize < 0 || int64(maxBufferSize) > int64(len(buffer)) {
+		return detour.DT_FAILURE | detour.DT_INVALID_PARAM
+	}
+	n := fastlz.Fastlz_decompress(compressed, int(compressedSize), buffer, int(maxBufferSize))
+	if n <= 0 {
+		return detour.DT_FAILURE
+	}
+	*bufferSize = int32(n)
+	return detour.DT_SUCCESS
 }
 
 const (
@@ -82,69 +112,84 @@ func (p *MeshProcess) Process(params *detour.DtNavMeshCreateParams, polyAreas []
 	}
 }
 
-func LoadTempObstaclesByBytes(data []byte) (*detour.DtNavMesh, *dtcache.DtTileCache) {
-
-	header := (*TileCacheSetHeader)(unsafe.Pointer(&(data[0])))
-	if header.magic != TILECACHESET_MAGIC {
-		return nil, nil
+// DecodeTempObstacles validates a little-endian tile-cache mesh set. No partially
+// loaded mesh or cache is returned when any layer or runtime tile fails.
+func DecodeTempObstacles(data []byte) (*detour.DtNavMesh, *dtcache.DtTileCache, error) {
+	if len(data) < 92 || len(data) > MaxMeshSetSize {
+		return nil, nil, fmt.Errorf("loader: invalid tile-cache set size")
 	}
-	if header.version != TILECACHESET_VERSION {
-		return nil, nil
+	r := bytes.NewReader(data)
+	var magic, version, count int32
+	_ = binary.Read(r, binary.LittleEndian, &magic)
+	_ = binary.Read(r, binary.LittleEndian, &version)
+	_ = binary.Read(r, binary.LittleEndian, &count)
+	if magic != TILECACHESET_MAGIC || version != TILECACHESET_VERSION || count < 0 {
+		return nil, nil, fmt.Errorf("loader: invalid tile-cache set header")
 	}
-
-	var navMesh = detour.DtAllocNavMesh()
-	if navMesh == nil {
-		return nil, nil
+	var params detour.DtNavMeshParams
+	var cp dtcache.DtTileCacheParams
+	if err := binary.Read(r, binary.LittleEndian, &params); err != nil {
+		return nil, nil, err
 	}
-
-	var status = navMesh.Init(&header.params)
-	if detour.DtStatusFailed(status) {
-		return nil, nil
+	if err := binary.Read(r, binary.LittleEndian, &cp); err != nil {
+		return nil, nil, err
 	}
-
-	var tileCache = dtcache.DtAllocTileCache()
-	if tileCache == nil {
-		return nil, nil
+	if count > cp.MaxTiles || uint32(count) > params.MaxTiles || int64(count) > int64(r.Len())/8 {
+		return nil, nil, fmt.Errorf("loader: inconsistent layer count")
 	}
-
-	status = tileCache.Init(&header.cacheParams, &FastLZCompressor{}, &MeshProcess{})
-	if detour.DtStatusFailed(status) {
-		return nil, nil
+	mesh := detour.DtAllocNavMesh()
+	if s := mesh.Init(&params); detour.DtStatusFailed(s) {
+		return nil, nil, fmt.Errorf("loader: mesh init: %#x", s)
 	}
-
-	var offset = int(unsafe.Sizeof(*header))
-	for i := 0; i < int(header.numTiles); i++ {
-		tileHeader := (*TileCacheTileHeader)(unsafe.Pointer(&(data[offset])))
-		offset += int(unsafe.Sizeof(*tileHeader))
-		if tileHeader.tileRef == 0 || tileHeader.dataSize == 0 {
-			break
+	cache := dtcache.DtAllocTileCache()
+	if s := cache.Init(&cp, &FastLZCompressor{}, &MeshProcess{}); detour.DtStatusFailed(s) {
+		return nil, nil, fmt.Errorf("loader: cache init: %#x", s)
+	}
+	for i := int32(0); i < count; i++ {
+		var ref uint32
+		var size int32
+		if err := binary.Read(r, binary.LittleEndian, &ref); err != nil {
+			return nil, nil, err
 		}
-
-		var tempData []byte
-		sliceHeader := (*reflect.SliceHeader)((unsafe.Pointer(&tempData)))
-		sliceHeader.Cap = int(tileHeader.dataSize)
-		sliceHeader.Len = int(tileHeader.dataSize)
-		sliceHeader.Data = uintptr(unsafe.Pointer(&data[offset]))
-		offset += int(tileHeader.dataSize)
-		data := make([]byte, tileHeader.dataSize)
-		copy(data, tempData)
-
+		if err := binary.Read(r, binary.LittleEndian, &size); err != nil {
+			return nil, nil, err
+		}
+		if ref == 0 || size <= 0 || int64(size) > int64(r.Len()) {
+			return nil, nil, fmt.Errorf("loader: invalid layer %d size or reference", i)
+		}
+		offset := len(data) - r.Len()
 		var tile dtcache.DtCompressedTileRef
-		status = tileCache.AddTile(data, tileHeader.dataSize, dtcache.DT_COMPRESSEDTILE_FREE_DATA, &tile)
-		detour.DtAssert(detour.DtStatusSucceed(status))
-
-		if tile != 0 {
-			tileCache.BuildNavMeshTile(tile, navMesh)
-		} else {
-			detour.DtAssert(false)
+		if s := cache.AddTile(data[offset:offset+int(size)], size, dtcache.DT_COMPRESSEDTILE_FREE_DATA, &tile); detour.DtStatusFailed(s) {
+			return nil, nil, fmt.Errorf("loader: layer %d add: %#x", i, s)
 		}
+		if s := cache.BuildNavMeshTile(tile, mesh); detour.DtStatusFailed(s) {
+			return nil, nil, fmt.Errorf("loader: layer %d build: %#x", i, s)
+		}
+		_, _ = r.Seek(int64(size), 1)
 	}
-	return navMesh, tileCache
+	if r.Len() != 0 {
+		return nil, nil, fmt.Errorf("loader: trailing tile-cache bytes")
+	}
+	return mesh, cache, nil
 }
 
-func LoadTempObstacles(path string) (*detour.DtNavMesh, *dtcache.DtTileCache) {
-	meshData, err := os.ReadFile(path)
-	detour.DtAssert(err == nil)
+// ReadTempObstacles reads a tile-cache set and preserves I/O and decoding errors.
+func ReadTempObstacles(path string) (*detour.DtNavMesh, *dtcache.DtTileCache, error) {
+	data, err := readBoundedFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return DecodeTempObstacles(data)
+}
 
-	return LoadTempObstaclesByBytes(meshData)
+// LoadTempObstaclesByBytes returns nil values for any invalid or incomplete set.
+func LoadTempObstaclesByBytes(data []byte) (*detour.DtNavMesh, *dtcache.DtTileCache) {
+	mesh, cache, _ := DecodeTempObstacles(data)
+	return mesh, cache
+}
+
+// LoadTempObstacles is the legacy file loader; errors return nil values.
+func LoadTempObstacles(path string) (*detour.DtNavMesh, *dtcache.DtTileCache) {
+	mesh, cache, _ := ReadTempObstacles(path)
+	return mesh, cache
 }

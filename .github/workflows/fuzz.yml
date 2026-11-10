@@ -1,0 +1,51 @@
+name: Bounded fuzz regression
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: artifact
+            target: FuzzDecode
+          - package: detour
+            target: FuzzDecodeNavMeshData
+          - package: loader
+            target: FuzzDecodeLegacyMeshSets
+          - package: fastlz
+            target: FuzzDecompress
+          - package: tilecache
+            target: FuzzDecodeLayer
+          - package: recast
+            target: FuzzBuildRejectsMalformedGeometry
+          - package: dynamic
+            target: FuzzWorldUpdates
+          - package: dynamic
+            target: FuzzCheckpointDecode
+    env:
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - name: Explore one target with a bounded worker count and duration
+        run: go test ./${{ matrix.package }} -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime=120s -parallel=2
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-failure-${{ matrix.package }}-${{ matrix.target }}
+          path: ${{ matrix.package }}/testdata/fuzz/
+          if-no-files-found: ignore
