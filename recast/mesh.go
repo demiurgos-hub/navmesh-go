@@ -537,8 +537,7 @@ func canRemoveVertex(mesh *PolyMesh, rem uint16) bool {
 		nv := countPolyVerts(p, nvp)
 
 		// Collect edges which touches the removed vertex.
-		for j, k := 0, nv-1; j < nv; k = j {
-			j++
+		for j, k := 0, nv-1; j < nv; k, j = j, j+1 {
 			if p[j] == rem || p[k] == rem {
 				// Arrange edge so that a=rem.
 				a := int(p[j])
@@ -622,8 +621,7 @@ func removeVertex(mesh *PolyMesh, rem uint16, maxTris int) bool {
 		}
 		if hasRem {
 			// Collect edges which does not touch the removed vertex.
-			for j, k := 0, nv-1; j < nv; k = j {
-				j++
+			for j, k := 0, nv-1; j < nv; k, j = j, j+1 {
 				if p[j] != rem && p[k] != rem {
 					e := edges[nedges*4:]
 					e[0] = int(p[k])

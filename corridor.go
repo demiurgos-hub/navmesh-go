@@ -2,7 +2,6 @@ package navmesh
 
 import (
 	"context"
-	"math"
 
 	"github.com/demiurgos-hub/navmesh-go/artifact"
 	"github.com/demiurgos-hub/navmesh-go/detour"
@@ -12,22 +11,32 @@ import (
 // corners. Unchanged tile revisions can be remapped into a new snapshot. A
 // changed suffix becomes a partial route; movement outside the corridor requests
 // a replan instead of silently teleporting or doing an unbounded search.
+// An input corridor exceeding this query's PathPolygons limit is rejected with
+// ResourceExhausted before scratch is allocated.
 func (q *Query) RepairPath(ctx context.Context, path *Path, current Surface, f Filter) PathResult {
 	if st := q.begin(ctx); st.Code != Complete {
 		return PathResult{Status: st}
 	}
 	defer q.end()
+	return q.repairPath(ctx, path, current, f)
+}
+
+// repairPath requires exclusive query ownership, including when called by rebase.
+func (q *Query) repairPath(ctx context.Context, path *Path, current Surface, f Filter) PathResult {
 	if path == nil || path.snapshot == nil || !q.valid(current) {
 		return PathResult{Status: failure(Stale, "navmesh: stale corridor/location")}
 	}
-	if path.snapshot.bundle.WorldID != q.snapshot.bundle.WorldID || path.snapshot.bundle.Profile.ID != q.snapshot.bundle.Profile.ID || path.snapshot.bundle.SettingsFingerprint != q.snapshot.bundle.SettingsFingerprint {
+	if !q.snapshot.Topology().compatible(path.snapshot) {
 		return PathResult{Status: failure(Stale, "navmesh: incompatible corridor world/profile")}
 	}
-	filter, err := f.detour()
+	filter, err := q.detourFilter(f)
 	if err != nil {
 		return PathResult{Status: failure(InvalidInput, err.Error())}
 	}
-	refs := make([]detour.DtPolyRef, 0, len(path.refs))
+	if len(path.refs) > q.limits.PathPolygons {
+		return PathResult{Status: failure(ResourceExhausted, "navmesh: corridor exceeds query capacity")}
+	}
+	refs := resizeScratch(&q.refs, len(path.refs))[:0]
 	status := path.status
 	for _, ref := range path.refs {
 		if err := ctx.Err(); err != nil {
@@ -48,14 +57,8 @@ func (q *Query) RepairPath(ctx context.Context, path *Path, current Surface, f F
 			status = Status{Code: Partial, Reason: Unloaded}
 			break
 		}
-		idx := -1
-		for i := range tile.Polys {
-			if &tile.Polys[i] == poly {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 || idx >= len(next.Polys) {
+		idx := int(path.snapshot.mesh.DecodePolyIdPoly(ref))
+		if idx >= len(next.Polys) {
 			status = Status{Code: Partial, Reason: Stale}
 			break
 		}
@@ -81,7 +84,7 @@ func (q *Query) RepairPath(ctx context.Context, path *Path, current Surface, f F
 			return PathResult{Status: failure(Stale, "navmesh: corridor disappeared")}
 		}
 		a, b := q.local(current.position), q.local(path.start.position)
-		visited := make([]detour.DtPolyRef, q.limits.PathPolygons)
+		visited := resizeScratch(&q.visited, q.localMovementLimit())
 		var count int
 		var point [3]float32
 		var hit bool
@@ -117,11 +120,13 @@ func (q *Query) RepairPath(ctx context.Context, path *Path, current Surface, f F
 				return PathResult{Status: failure(Stale, "navmesh: actual movement left the corridor; replan required")}
 			}
 		}
-		merged := append([]detour.DtPolyRef(nil), visited[:joinVisited]...)
-		merged = append(merged, refs[joinPath:]...)
-		if len(merged) > q.limits.PathPolygons {
+		mergedCount := joinVisited + len(refs) - joinPath
+		if mergedCount > q.limits.PathPolygons {
 			return PathResult{Status: failure(ResourceExhausted, "navmesh: repaired corridor capacity")}
 		}
+		merged := resizeScratch(&q.merged, mergedCount)[:0]
+		merged = append(merged, visited[:joinVisited]...)
+		merged = append(merged, refs[joinPath:]...)
 		refs = merged
 		first = 0
 	}
@@ -135,58 +140,43 @@ func (q *Query) RepairPath(ctx context.Context, path *Path, current Surface, f F
 	return q.pathFromRefs(current, refs, end, status)
 }
 
-func (q *Query) normal(ref detour.DtPolyRef, pos [3]float32) Vec3 {
-	var tile *detour.DtMeshTile
-	var poly *detour.DtPoly
-	if detour.DtStatusFailed(q.snapshot.mesh.GetTileAndPolyByRef(ref, &tile, &poly)) || poly.GetType() != detour.DT_POLYTYPE_GROUND {
-		return Vec3{}
-	}
-	index := -1
-	for i := range tile.Polys {
-		if &tile.Polys[i] == poly {
-			index = i
-			break
-		}
-	}
-	if index < 0 || index >= len(tile.DetailMeshes) {
-		return Vec3{}
-	}
-	detail := tile.DetailMeshes[index]
-	vertex := func(i uint8) Vec3 {
-		var v []float32
-		if i < poly.VertCount {
-			idx := int(poly.Verts[i]) * 3
-			v = tile.Verts[idx : idx+3]
-		} else {
-			idx := (int(detail.VertBase) + int(i) - int(poly.VertCount)) * 3
-			v = tile.DetailVerts[idx : idx+3]
-		}
-		return Vec3{X: float64(v[0]), Y: float64(v[1]), Z: float64(v[2])}
-	}
-	for i := uint32(0); i < uint32(detail.TriCount); i++ {
-		tri := tile.DetailTris[(detail.TriBase+i)*4:]
-		a, b, c := vertex(tri[0]), vertex(tri[1]), vertex(tri[2])
-		ux, uz := b.X-a.X, b.Z-a.Z
-		vx, vz := c.X-a.X, c.Z-a.Z
-		dx, dz := float64(pos[0])-a.X, float64(pos[2])-a.Z
-		den := ux*vz - uz*vx
-		if math.Abs(den) < 1e-15 {
+// Ground funnels are separated by explicit traversal markers. A funnel over the
+// whole corridor can skip an off-mesh portal coincident with its starting XZ,
+// especially for vertical links. Such links must still reach host policy.
+func (q *Query) straightPath(start, end [3]float32, refs []detour.DtPolyRef, points []float32, flags []detour.DtStraightPathFlags, cornerRefs []detour.DtPolyRef) (detour.DtStatus, int) {
+	first, count := 0, 0
+	for i, ref := range refs {
+		if q.snapshot.mesh.GetOffMeshConnectionByRef(ref) == nil {
 			continue
 		}
-		u, v := (dx*vz-dz*vx)/den, (ux*dz-uz*dx)/den
-		if u < -1e-5 || v < -1e-5 || u+v > 1+1e-5 {
-			continue
+		if i == first || i+1 >= len(refs) {
+			return detour.DT_FAILURE | detour.DT_INVALID_PARAM, count
 		}
-		uy, vy := b.Y-a.Y, c.Y-a.Y
-		n := Vec3{X: uy*vz - uz*vy, Y: uz*vx - ux*vz, Z: ux*vy - uy*vx}
-		length := math.Sqrt(n.X*n.X + n.Y*n.Y + n.Z*n.Z)
-		if length == 0 {
-			continue
+		var from, to [3]float32
+		if st := q.snapshot.mesh.GetOffMeshConnectionPolyEndPoints(refs[i-1], ref, from[:], to[:]); detour.DtStatusFailed(st) {
+			return st, count
 		}
-		if n.Y < 0 {
-			length = -length
+		var n int
+		st := q.query.FindStraightPath(start[:], from[:], refs[first:i], i-first, points[count*3:], flags[count:], cornerRefs[count:], &n, len(flags)-count, 0)
+		count += n
+		if detour.DtStatusFailed(st) || n == 0 {
+			return st, count
 		}
-		return Vec3{X: n.X / length, Y: n.Y / length, Z: n.Z / length}
+		// If the output ends at the link entrance, retain ground support until
+		// there is also room for its landing. A truncated route must not expose
+		// an off-mesh surface as its reachable endpoint.
+		if flags[count-1]&detour.DT_STRAIGHTPATH_END != 0 {
+			cornerRefs[count-1] = refs[i-1]
+		}
+		if detour.DtStatusDetail(st, detour.DT_BUFFER_TOO_SMALL|detour.DT_PARTIAL_RESULT) {
+			return st, count
+		}
+		flags[count-1] = detour.DT_STRAIGHTPATH_OFFMESH_CONNECTION
+		cornerRefs[count-1] = ref
+		copy(points[(count-1)*3:count*3], from[:])
+		start, first = to, i+1
 	}
-	return Vec3{}
+	var n int
+	st := q.query.FindStraightPath(start[:], end[:], refs[first:], len(refs)-first, points[count*3:], flags[count:], cornerRefs[count:], &n, len(flags)-count, 0)
+	return st, count + n
 }

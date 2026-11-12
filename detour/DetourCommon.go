@@ -615,35 +615,11 @@ func DtClosestHeightPointTriangle(p, a, b, c []float32, h *float32) bool {
 	a = a[:3:3]
 	b = b[:3:3]
 	c = c[:3:3]
-	v0 := [3]float32{}
-	v1 := [3]float32{}
-	v2 := [3]float32{}
-	DtVsub(v0[:], c, a)
-	DtVsub(v1[:], b, a)
-	DtVsub(v2[:], p, a)
-
-	dot00 := DtVdot2D(v0[:], v0[:])
-	dot01 := DtVdot2D(v0[:], v1[:])
-	dot02 := DtVdot2D(v0[:], v2[:])
-	dot11 := DtVdot2D(v1[:], v1[:])
-	dot12 := DtVdot2D(v1[:], v2[:])
-
-	// Compute barycentric coordinates
-	invDenom := 1.0 / (dot00*dot11 - dot01*dot01)
-	u := (dot11*dot02 - dot01*dot12) * invDenom
-	v := (dot00*dot12 - dot01*dot02) * invDenom
-
-	// The (sloppy) epsilon is needed to allow to get height of points which
-	// are interpolated along the edges of the triangles.
-	//	static const float EPS = 1e-4f;
-
-	// If point lies inside the triangle, return interpolated ycoord.
-	if u >= -EPS && v >= -EPS && (u+v) <= 1+EPS {
-		*h = a[1] + v0[1]*u + v1[1]*v
-		return true
+	height, ok := dtClosestHeightPointTriangle([3]float32{p[0], p[1], p[2]}, [3]float32{a[0], a[1], a[2]}, [3]float32{b[0], b[1], b[2]}, [3]float32{c[0], c[1], c[2]})
+	if ok {
+		*h = height
 	}
-
-	return false
+	return ok
 }
 
 func DtIntersectSegmentPoly2D(p0, p1, verts []float32, nverts int, tmin, tmax *float32, segMin, segMax *int) bool {

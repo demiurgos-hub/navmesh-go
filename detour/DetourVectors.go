@@ -93,18 +93,19 @@ func dtClosestHeightPointTriangle(p, a, b, c [3]float32) (h float32, ok bool) {
 	v1[0], v1[1], v1[2] = b[0]-a[0], b[1]-a[1], b[2]-a[2]
 	v2[0], v2[1], v2[2] = p[0]-a[0], p[1]-a[1], p[2]-a[2]
 
-	dot00 := v0[0]*v0[0] + v0[2]*v0[2]
-	dot01 := v0[0]*v1[0] + v0[2]*v1[2]
-	dot02 := v0[0]*v2[0] + v0[2]*v2[2]
-	dot11 := v1[0]*v1[0] + v1[2]*v1[2]
-	dot12 := v1[0]*v2[0] + v1[2]*v2[2]
-
-	invDenom := 1.0 / (dot00*dot11 - dot01*dot01)
-	u := (dot11*dot02 - dot01*dot12) * invDenom
-	v := (dot00*dot12 - dot01*dot02) * invDenom
-
-	if u >= -EPS && v >= -EPS && (u+v) <= 1+EPS {
-		return a[1] + v0[1]*u + v1[1]*v, true
+	// Scaled cross products avoid subtracting nearly equal squared dot
+	// products for thin detail triangles. This matches pinned upstream Detour.
+	denom := v0[0]*v1[2] - v0[2]*v1[0]
+	if DtAbsFloat32(denom) < 1e-6 {
+		return 0, false
+	}
+	u := v1[2]*v2[0] - v1[0]*v2[2]
+	v := v0[0]*v2[2] - v0[2]*v2[0]
+	if denom < 0 {
+		denom, u, v = -denom, -u, -v
+	}
+	if u >= 0 && v >= 0 && u+v <= denom {
+		return a[1] + (v0[1]*u+v1[1]*v)/denom, true
 	}
 	return 0, false
 }

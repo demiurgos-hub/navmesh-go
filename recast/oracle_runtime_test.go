@@ -143,8 +143,9 @@ func compareRuntimeOracle(t *testing.T, got, want []runtimeOracleResult, probes 
 		heightStatusMatches := a.HeightStatus == b.HeightStatus
 		if probes[i].BoundaryHeight {
 			// The current C++ pin uses strict point-in-polygon membership;
-			// the Go translation accepts triangle edges within EPS. Preserve
-			// and document this useful portal-height behavior explicitly.
+			// the Go query includes detail-triangle edges and checks a bounded
+			// coordinate-ULP margin for rounded polygon edges. Preserve this
+			// selected-polygon boundary-height contract explicitly.
 			if a.HeightStatus != uint32(detour.DT_SUCCESS) || b.HeightStatus != uint32(detour.DT_FAILURE|detour.DT_INVALID_PARAM) || math.Abs(float64(a.Height-a.Start[1])) > 1e-4 {
 				t.Fatalf("boundary height deviation changed; review contract: Go=%+v C++=%+v", a, b)
 			}
@@ -168,7 +169,13 @@ func compareRuntimeOracle(t *testing.T, got, want []runtimeOracleResult, probes 
 	if requirePath && (len(want) == 0 || !want[0].Complete) {
 		t.Fatalf("reference probes do not exercise a complete route: %+v", want)
 	}
-	if requirePath && len(want) >= 4 && (want[1].EndFound || !want[1].Hit) {
-		t.Fatalf("reference probes do not exercise missing/wall cases: %+v", want)
+	if requirePath && len(want) >= 4 {
+		missingWall := false
+		for _, probe := range want {
+			missingWall = missingWall || !probe.EndFound && probe.Hit
+		}
+		if !missingWall {
+			t.Fatalf("reference probes do not exercise missing/wall cases: %+v", want)
+		}
 	}
 }

@@ -4,11 +4,11 @@ package dynamic
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	navmesh "github.com/demiurgos-hub/navmesh-go"
 	"github.com/demiurgos-hub/navmesh-go/artifact"
@@ -59,6 +59,9 @@ type Changes struct {
 // World is a concurrency-safe desired-state registry and snapshot publisher.
 // Call Prepare on a host-owned background worker, Commit on its publication
 // thread, and Acquire for concurrent readers. No background work is implicit.
+// Desired geometry retains its resolved triangles and lazy spatial index to
+// avoid repeating resolution on every preparation. This increases retained
+// source memory; runtime snapshots and leases do not retain that source cache.
 type World struct {
 	mu          sync.Mutex
 	scene       geom.Scene
@@ -71,7 +74,12 @@ type World struct {
 	building    bool
 	prepared    *Candidate
 	leases      map[*navmesh.Snapshot]int
+	retired     map[*navmesh.Snapshot]map[artifact.TileKey]bool
 	unavailable map[artifact.TileKey]bool
+	safety      atomic.Pointer[Safety]
+	safetyToken uint64
+	source      sourceMetadata
+	geometry    *bake.PreparedSource
 }
 
 // New bakes and validates initial source geometry synchronously.
@@ -80,7 +88,20 @@ func New(ctx context.Context, scene geom.Scene, config bake.Config) (*World, err
 	if err := normalizeRevisions(geom.Scene{}, &scene); err != nil {
 		return nil, err
 	}
-	r, err := bake.Build(ctx, scene, config)
+	if ctx == nil {
+		return nil, errors.New("dynamic: nil context")
+	}
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	geometry, err := bake.PrepareSource(scene, config.Settings.Origin, config.Strict)
+	if err != nil {
+		return nil, err
+	}
+	r, err := geometry.BuildTiles(ctx, config, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +109,8 @@ func New(ctx context.Context, scene geom.Scene, config bake.Config) (*World, err
 	if err != nil {
 		return nil, err
 	}
-	return &World{scene: scene.Clone(), config: config, revision: snapshot.Revision(), current: snapshot, dirty: map[artifact.TileKey]bool{}, state: Committed, leases: map[*navmesh.Snapshot]int{}, unavailable: map[artifact.TileKey]bool{}}, nil
+	source := sourceState(scene, geometry, config.Settings.Origin, config.Settings.Bounds, config.Profile.Height)
+	return &World{scene: scene, source: source, geometry: geometry, config: config, revision: snapshot.Revision(), current: snapshot, dirty: map[artifact.TileKey]bool{}, state: Committed, leases: map[*navmesh.Snapshot]int{}, unavailable: map[artifact.TileKey]bool{}}, nil
 }
 
 // Snapshot returns the immutable current snapshot. Managed hosts should Acquire
@@ -129,37 +151,37 @@ func (w *World) Desired() (geom.Scene, bake.Config, uint64) {
 // desired-state edits may return ErrSuperseded and should be recaptured/retried.
 func (w *World) Apply(ch Changes) (Update, error) {
 	w.mu.Lock()
-	previous, config, revision := w.scene, w.config, w.revision
+	previous, config, revision, priorSource := w.scene, w.config, w.revision, w.source
 	w.mu.Unlock()
-	next := previous.Clone()
+	// Every retained source is private and immutable. Copy incoming arrays;
+	// merge creates new containers while unchanged geometry remains read-only.
+	owned := (geom.Scene{Assets: ch.Assets, Instances: ch.Instances, Volumes: ch.Volumes, Links: ch.Links}).Clone()
+	next := previous
 	var err error
-	next.Assets, err = merge(next.Assets, ch.Assets, ch.RemoveAssets, func(v geom.Asset) string { return v.ID })
+	next.Assets, err = merge(next.Assets, owned.Assets, ch.RemoveAssets, func(v geom.Asset) string { return v.ID })
 	if err != nil {
 		return Update{}, err
 	}
-	next.Instances, err = merge(next.Instances, ch.Instances, ch.RemoveInstances, func(v geom.Instance) string { return v.ID })
+	next.Instances, err = merge(next.Instances, owned.Instances, ch.RemoveInstances, func(v geom.Instance) string { return v.ID })
 	if err != nil {
 		return Update{}, err
 	}
-	next.Volumes, err = merge(next.Volumes, ch.Volumes, ch.RemoveVolumes, func(v geom.Volume) string { return v.ID })
+	next.Volumes, err = merge(next.Volumes, owned.Volumes, ch.RemoveVolumes, func(v geom.Volume) string { return v.ID })
 	if err != nil {
 		return Update{}, err
 	}
-	next.Links, err = merge(next.Links, ch.Links, ch.RemoveLinks, func(v geom.Link) string { return v.ID })
+	next.Links, err = merge(next.Links, owned.Links, ch.RemoveLinks, func(v geom.Link) string { return v.ID })
 	if err != nil {
 		return Update{}, err
 	}
 	if err = normalizeRevisions(previous, &next); err != nil {
 		return Update{}, err
 	}
-	// Own every upsert slice before publishing or resolving it.
-	next = next.Clone()
-	if _, err = next.Resolve(config.Settings.Origin, config.Strict); err != nil {
+	geometry, err := bake.PrepareSource(next, config.Settings.Origin, config.Strict)
+	if err != nil {
 		return Update{}, err
 	}
-	oldHash, _ := previous.Fingerprint()
-	newHash, _ := next.Fingerprint()
-	if oldHash == newHash {
+	if priorSource.fingerprint == geometry.SourceFingerprint() {
 		w.mu.Lock()
 		if w.revision != revision {
 			w.mu.Unlock()
@@ -173,10 +195,8 @@ func (w *World) Apply(ch Changes) (Update, error) {
 	if revision == ^uint64(0) {
 		return Update{}, errors.New("dynamic: revision exhausted")
 	}
-	boxes, err := changedBounds(previous, next, config.Profile.Height)
-	if err != nil {
-		return Update{}, err
-	}
+	nextSource := sourceState(next, geometry, config.Settings.Origin, config.Settings.Bounds, config.Profile.Height)
+	boxes := changedSourceBounds(priorSource, nextSource)
 	keys, err := bake.TileKeys(config)
 	if err != nil {
 		return Update{}, err
@@ -199,7 +219,10 @@ func (w *World) Apply(ch Changes) (Update, error) {
 		w.dirty[key] = true
 	}
 	w.scene = next
+	w.source = nextSource
+	w.geometry = geometry
 	w.revision++
+	w.invalidateSafetyLocked()
 	w.state = Pending
 	w.lastError = nil
 	if w.prepared != nil {
@@ -244,69 +267,6 @@ func merge[T any](old, upserts []T, removes []string, id func(T) string) ([]T, e
 		out = append(out, m[k])
 	}
 	return out, nil
-}
-func changedBounds(a, b geom.Scene, agentHeight float64) ([]geom.Bounds, error) {
-	type object struct {
-		data string
-		box  geom.Bounds
-	}
-	objects := func(s geom.Scene) (map[string]object, error) {
-		r, e := s.Resolve(geom.Vec3{}, false)
-		if e != nil {
-			return nil, e
-		}
-		out := map[string]object{}
-		groups := map[string][]geom.ResolvedTriangle{}
-		for _, t := range r.Triangles {
-			groups[t.ObjectID] = append(groups[t.ObjectID], t)
-		}
-		for id, ts := range groups {
-			box := ts[0].Bounds
-			for _, t := range ts[1:] {
-				box = box.Union(t.Bounds)
-			}
-			data, _ := json.Marshal(ts)
-			out["object:"+id] = object{string(data), box}
-		}
-		for _, v := range s.Volumes {
-			data, _ := json.Marshal(v)
-			box := v.Bounds
-			if v.Exclude {
-				box.Min.Y -= agentHeight
-			}
-			out["volume:"+v.ID] = object{string(data), box}
-		}
-		for _, l := range s.Links {
-			data, _ := json.Marshal(l)
-			box := geom.Bounds{Min: l.Start, Max: l.Start}.Union(geom.Bounds{Min: l.End, Max: l.End}).Expand(geom.Vec3{X: l.Radius, Y: l.Radius, Z: l.Radius})
-			out["link:"+l.ID] = object{string(data), box}
-		}
-		return out, nil
-	}
-	x, err := objects(a)
-	if err != nil {
-		return nil, err
-	}
-	y, err := objects(b)
-	if err != nil {
-		return nil, err
-	}
-	var boxes []geom.Bounds
-	for id, o := range x {
-		n, ok := y[id]
-		if !ok || o.data != n.data {
-			boxes = append(boxes, o.box)
-			if ok {
-				boxes = append(boxes, n.box)
-			}
-		}
-	}
-	for id, n := range y {
-		if _, ok := x[id]; !ok {
-			boxes = append(boxes, n.box)
-		}
-	}
-	return boxes, nil
 }
 func sortedKeys(m map[artifact.TileKey]bool) []artifact.TileKey {
 	out := keySlice(m)
@@ -369,12 +329,9 @@ func (w *World) Prepare(ctx context.Context) (*Candidate, error) {
 		return nil, ErrBusy
 	}
 	// Source captures are immutable: Apply replaces complete owned scenes.
-	scene, cfg, revision, base := w.scene, w.config, w.revision, w.current
+	scene, cfg, revision, base, source, geometry := w.scene, w.config, w.revision, w.current, w.source, w.geometry
 	keys := keySlice(w.dirty)
-	unavailable := map[artifact.TileKey]bool{}
-	for k, v := range w.unavailable {
-		unavailable[k] = v
-	}
+	unavailable := keySlice(w.unavailable)
 	cfg.Revision = revision
 	w.building = true
 	w.state = Building
@@ -393,53 +350,30 @@ func (w *World) Prepare(ctx context.Context) (*Candidate, error) {
 		}
 		return nil, err
 	}
-	b, err := base.Bundle()
-	if err != nil {
-		return fail(err)
-	}
 	if ctx == nil {
 		return fail(errors.New("dynamic: nil context"))
 	}
-	if err = ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return fail(err)
 	}
+	var b artifact.Bundle
 	if len(keys) > 0 {
-		result, e := bake.BuildTiles(ctx, scene, cfg, keys)
+		result, e := geometry.BuildTiles(ctx, cfg, keys)
 		if e != nil {
 			return fail(e)
 		}
-		replacement := map[artifact.TileKey]artifact.Tile{}
-		for _, t := range result.Bundle.Tiles {
-			replacement[t.Key] = t
-		}
-		var tiles []artifact.Tile
-		for _, t := range b.Tiles {
-			column := artifact.TileKey{X: t.Key.X, Z: t.Key.Z}
-			if _, changed := replacement[column]; !changed {
-				tiles = append(tiles, t)
-			}
-		}
-		tiles = append(tiles, result.Bundle.Tiles...)
 		b = result.Bundle
-		b.Tiles = tiles
 	} else {
-		b.Revision = revision
-		resolved, e := scene.Resolve(cfg.Settings.Origin, cfg.Strict)
-		if e != nil {
-			return fail(e)
+		fingerprint, err := cfg.Fingerprint()
+		if err != nil {
+			return fail(err)
 		}
-		b.SourceFingerprint, b.ResolvedFingerprint = resolved.Fingerprint, resolved.ResolvedFingerprint
-		b.Links = append([]geom.Link(nil), scene.Links...)
+		b = artifact.Bundle{WorldID: cfg.WorldID, Profile: cfg.Profile, Settings: cfg.Settings,
+			SourceFingerprint: source.fingerprint, ResolvedFingerprint: source.resolvedFingerprint,
+			SettingsFingerprint: fingerprint, Links: scene.Links}
 	}
-	filtered := b.Tiles[:0]
-	for _, t := range b.Tiles {
-		if !unavailable[artifact.TileKey{X: t.Key.X, Z: t.Key.Z}] {
-			filtered = append(filtered, t)
-		}
-	}
-	b.Tiles = filtered
 	b.Revision = revision
-	snapshot, err := navmesh.NewSnapshot(b)
+	snapshot, err := base.RebuildColumns(b, keys, unavailable)
 	if err != nil {
 		return fail(err)
 	}
@@ -459,7 +393,9 @@ func (w *World) Prepare(ctx context.Context) (*Candidate, error) {
 }
 
 // Commit atomically publishes a prepared candidate if all captured revisions
-// remain current. This performs no baking, mesh assembly, or disk IO.
+// remain current. Changed columns stay quarantined until every managed lease
+// on a generation predating those changes is released. This performs no baking,
+// mesh assembly, or disk IO.
 func (w *World) Commit(c *Candidate) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -467,9 +403,11 @@ func (w *World) Commit(c *Candidate) error {
 		return ErrSuperseded
 	}
 	old := w.current
+	w.protectRetiredLocked(c.dirty)
 	w.current = c.snapshot
 	w.prepared = nil
 	w.dirty = map[artifact.TileKey]bool{}
+	w.invalidateSafetyLocked()
 	w.state = Committed
 	w.lastError = nil
 	if w.leases[old] == 0 {
@@ -519,6 +457,7 @@ func (w *World) SetLoaded(keys []artifact.TileKey, loaded bool) (Update, error) 
 	}
 	w.revision++
 	w.prepared = nil
+	w.invalidateSafetyLocked()
 	w.state = Pending
 	return Update{w.revision, w.state, sortedKeys(w.dirty), nil}, nil
 }
@@ -551,6 +490,12 @@ func (l *Lease) Release() {
 		w.leases[l.Snapshot]--
 		if w.leases[l.Snapshot] == 0 {
 			delete(w.leases, l.Snapshot)
+			if l.Snapshot != w.current || len(w.retired[l.Snapshot]) != 0 {
+				delete(w.retired, l.Snapshot)
+				// Scope membership changes even when an identical publication
+				// retired this identity without adding quarantine columns.
+				w.invalidateSafetyLocked()
+			}
 		}
 	})
 }

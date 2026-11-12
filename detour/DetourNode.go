@@ -1,4 +1,4 @@
-//
+// Modified Go translation for navmesh-go; see PROVENANCE.md.
 // Copyright (c) 2009-2010 Mikko Mononen memon@inside.org
 //
 // This software is provided 'as-is', without any express or implied
@@ -39,59 +39,66 @@ const DT_NODE_STATE_BITS uint32 = 2
 const DT_NODE_FLAGS_BITS uint32 = 3
 
 type DtNode struct {
-	Pos   [3]float32  ///< Position of the node.
-	Cost  float32     ///< Cost from previous node to current node.
-	Total float32     ///< Cost up to the node.
-	Pidx  uint32      ///< Index to parent node.
-	State uint8       ///< extra state information. A polyRef can have multiple nodes with different extra info. see DT_MAX_STATES_PER_NODE
-	Flags DtNodeFlags ///< Node flags. A combination of dtNodeFlags.
-	Id    DtPolyRef   ///< Polygon ref the node corresponds to.
+	Pos       [3]float32  ///< Position of the node.
+	Cost      float32     ///< Cost from previous node to current node.
+	Total     float32     ///< Cost up to the node.
+	Pidx      uint32      ///< Index to parent node.
+	State     uint8       ///< extra state information. A polyRef can have multiple nodes with different extra info. see DT_MAX_STATES_PER_NODE
+	Flags     DtNodeFlags ///< Node flags. A combination of dtNodeFlags.
+	poolIndex DtNodeIndex
+	Id        DtPolyRef ///< Polygon ref the node corresponds to.
 }
 
 const DT_MAX_STATES_PER_NODE int = 1 << DT_NODE_STATE_BITS // number of extra states per node. See dtNode::state
 
-// Declared as a constant (not a var) so the division in GetNodeIdx is
-// strength-reduced by the compiler instead of emitting a runtime division.
-const sizeofNode = uint32(unsafe.Sizeof(DtNode{}))
+const nodeBlockSize = 128
+
+type nodeBlock struct {
+	nodes []DtNode
+	next  []DtNodeIndex
+}
 
 type DtNodePool struct {
-	m_nodes     []DtNode
+	m_blocks    []nodeBlock
 	m_first     []DtNodeIndex
-	m_next      []DtNodeIndex
 	m_maxNodes  uint32
 	m_hashSize  uint32
 	m_nodeCount uint32
-
-	base uintptr
 }
 
+// GetNodeIdx returns the one-based index of a node allocated by this pool.
 func (this *DtNodePool) GetNodeIdx(node *DtNode) uint32 {
 	if node == nil {
 		return 0
 	}
-	current := uintptr(unsafe.Pointer(node))
-	return (uint32)(current-this.base)/sizeofNode + 1
+	return uint32(node.poolIndex) + 1
 }
 
+// GetNodeAtIdx returns the currently allocated node at idx, or nil if invalid.
 func (this *DtNodePool) GetNodeAtIdx(idx uint32) *DtNode {
-	if idx == 0 {
+	if idx == 0 || idx > this.m_nodeCount {
 		return nil
 	}
-	return &this.m_nodes[idx-1]
+	return this.nodeAt(DtNodeIndex(idx - 1))
 }
 
+// GetMemUsed reports allocated pool storage, which grows within GetMaxNodes.
 func (this *DtNodePool) GetMemUsed() uint32 {
-	return uint32(unsafe.Sizeof(*this)) +
-		uint32(unsafe.Sizeof(DtNode{}))*this.m_maxNodes +
-		uint32(unsafe.Sizeof(DtNodeIndex(0)))*this.m_maxNodes +
-		uint32(unsafe.Sizeof(DtNodeIndex(0)))*this.m_hashSize
+	n := uint32(unsafe.Sizeof(*this)) + uint32(cap(this.m_blocks))*uint32(unsafe.Sizeof(nodeBlock{})) +
+		uint32(cap(this.m_first))*uint32(unsafe.Sizeof(DtNodeIndex(0)))
+	for _, block := range this.m_blocks {
+		n += uint32(cap(block.nodes))*uint32(unsafe.Sizeof(DtNode{})) + uint32(cap(block.next))*uint32(unsafe.Sizeof(DtNodeIndex(0)))
+	}
+	return n
 }
 
 func (this *DtNodePool) GetMaxNodes() uint32             { return this.m_maxNodes }
 func (this *DtNodePool) GetHashSize() uint32             { return this.m_hashSize }
 func (this *DtNodePool) GetFirst(bucket int) DtNodeIndex { return this.m_first[bucket] }
-func (this *DtNodePool) GetNext(i int) DtNodeIndex       { return this.m_next[i] }
-func (this *DtNodePool) GetNodeCount() uint32            { return this.m_nodeCount }
+func (this *DtNodePool) GetNext(i int) DtNodeIndex {
+	return this.m_blocks[i/nodeBlockSize].next[i%nodeBlockSize]
+}
+func (this *DtNodePool) GetNodeCount() uint32 { return this.m_nodeCount }
 
 func DtAllocNodePool(maxNodes, hashSize uint32) *DtNodePool {
 	pool := &DtNodePool{}
@@ -124,6 +131,19 @@ func (this *DtNodeQueue) Pop() *DtNode {
 }
 
 func (this *DtNodeQueue) Push(node *DtNode) {
+	DtAssert(this.m_size < this.m_capacity)
+	if this.m_size == len(this.m_heap) {
+		n := len(this.m_heap) * 2
+		if n < 64 {
+			n = 64
+		}
+		if n > this.m_capacity+1 {
+			n = this.m_capacity + 1
+		}
+		heap := make([]*DtNode, n)
+		copy(heap, this.m_heap)
+		this.m_heap = heap
+	}
 	this.m_size++
 	this.bubbleUp(this.m_size-1, node)
 }
@@ -149,9 +169,10 @@ func (this *DtNodeQueue) Modify(node *DtNode) {
 
 func (this *DtNodeQueue) Empty() bool { return this.m_size == 0 }
 
+// GetMemUsed reports allocated queue storage rather than its configured limit.
 func (this *DtNodeQueue) GetMemUsed() uint32 {
 	return uint32(unsafe.Sizeof(*this)) +
-		uint32(unsafe.Sizeof(&this.m_heap[0]))*uint32(this.m_capacity+1)
+		uint32(unsafe.Sizeof((*DtNode)(nil)))*uint32(cap(this.m_heap))
 }
 
 func (this *DtNodeQueue) GetCapacity() int { return this.m_capacity }

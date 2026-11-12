@@ -103,6 +103,13 @@ func (this *DtNavMeshQuery) constructor() {
 }
 
 func (this *DtNavMeshQuery) destructor() {
+	this.m_nav = nil
+	this.m_maxNodes = 0
+	this.m_query = dtQueryData{}
+	this.m_raycastVisited = nil
+	this.m_findNearestPolyQuery = dtFindNearestPolyQuery{}
+	this.m_collectPolysQuery = dtCollectPolysQuery{}
+	this.m_polyBatchPolys = [DT_POLY_QUERY_BATCH_SIZE]*DtPoly{}
 	if this.m_tinyNodePool != nil {
 		DtFreeNodePool(this.m_tinyNodePool)
 		this.m_tinyNodePool = nil
@@ -117,7 +124,10 @@ func (this *DtNavMeshQuery) destructor() {
 	}
 }
 
-// / Initializes the query object.
+// Init initializes the query object without allocating search pools. Scratch is
+// created on its first relevant operation and reused; nodes and queue storage
+// grow as needed up to maxNodes. Reinitializing invalidates any sliced search
+// and drops full search pools when maxNodes changes.
 // /  @param[in]		nav			Pointer to the dtNavMesh object to use for all queries.
 // /  @param[in]		maxNodes	Maximum number of search nodes. [Limits: 0 < value <= 65535]
 // / @returns The status flags for the query.
@@ -128,51 +138,34 @@ func (this *DtNavMeshQuery) destructor() {
 // /
 // / This function can be used multiple times.
 func (this *DtNavMeshQuery) Init(nav *DtNavMesh, maxNodes int) DtStatus {
-	if nav == nil || nav.m_maxTiles <= 0 || maxNodes <= 0 {
+	if this == nil || nav == nil || nav.m_maxTiles <= 0 || maxNodes <= 0 {
 		return DT_FAILURE | DT_INVALID_PARAM
 	}
-	this.m_query = dtQueryData{}
 
 	if maxNodes > int(DT_NULL_IDX) || maxNodes > int((1<<DT_NODE_PARENT_BITS)-1) {
 		return DT_FAILURE | DT_INVALID_PARAM
 	}
 	this.m_nav = nav
+	this.m_query = dtQueryData{}
+	this.m_maxNodes = maxNodes
+	this.m_findNearestPolyQuery = dtFindNearestPolyQuery{}
+	this.m_collectPolysQuery = dtCollectPolysQuery{}
+	this.m_polyBatchPolys = [DT_POLY_QUERY_BATCH_SIZE]*DtPoly{}
 
-	if this.m_nodePool == nil || this.m_nodePool.GetMaxNodes() < uint32(maxNodes) {
-		if this.m_nodePool != nil {
+	if this.m_nodePool != nil {
+		if this.m_nodePool.GetMaxNodes() != uint32(maxNodes) {
 			DtFreeNodePool(this.m_nodePool)
 			this.m_nodePool = nil
-		}
-		this.m_nodePool = DtAllocNodePool(uint32(maxNodes), DtMaxUInt32(1, DtNextPow2(uint32(maxNodes/4))))
-		if this.m_nodePool == nil {
-			return DT_FAILURE | DT_OUT_OF_MEMORY
-		}
-	} else {
-		this.m_nodePool.Clear()
-	}
-
-	if this.m_tinyNodePool == nil {
-		this.m_tinyNodePool = DtAllocNodePool(64, 32)
-		if this.m_tinyNodePool == nil {
-			return DT_FAILURE | DT_OUT_OF_MEMORY
-		}
-	} else {
-		this.m_tinyNodePool.Clear()
-	}
-
-	if this.m_openList == nil || this.m_openList.GetCapacity() < maxNodes {
-		if this.m_openList != nil {
 			DtFreeNodeQueue(this.m_openList)
 			this.m_openList = nil
+		} else {
+			this.m_nodePool.Clear()
+			this.m_openList.Clear()
 		}
-		this.m_openList = DtAllocNodeQueue(maxNodes)
-		if this.m_openList == nil {
-			return DT_FAILURE | DT_OUT_OF_MEMORY
-		}
-	} else {
-		this.m_openList.Clear()
 	}
-
+	if this.m_tinyNodePool != nil {
+		this.m_tinyNodePool.Clear()
+	}
 	return DT_SUCCESS
 }
 
@@ -288,8 +281,9 @@ func (this *DtNavMeshQuery) FindRandomPointAroundCircle(startRef DtPolyRef, cent
 	filter *DtQueryFilter, frand func() float32,
 	randomRef *DtPolyRef, randomPt []float32) DtStatus {
 	DtAssert(this.m_nav != nil)
-	DtAssert(this.m_nodePool != nil)
-	DtAssert(this.m_openList != nil)
+	if !this.ensureSearchScratch() {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
 
 	// Validate input
 	if startRef == 0 || !this.m_nav.IsValidPolyRef(startRef) {
@@ -557,8 +551,14 @@ func (this *DtNavMeshQuery) ClosestPointOnPoly(ref DtPolyRef, pos, closest []flo
 		}
 		if h, ok := dtClosestHeightPointTriangle(closestV, v[0], v[1], v[2]); ok {
 			closest[1] = h
-			break
+			return DT_SUCCESS
 		}
+	}
+	// Rounded detail edges can leave no containing triangle. The XZ position
+	// is already clamped to this polygon; sample its nearest detail edge only.
+	var edgePoint [3]float32
+	if closestPointOnDetailEdges(tile, poly, pd, closestV, &edgePoint) {
+		closest[1] = edgePoint[1]
 	}
 
 	return DT_SUCCESS
@@ -635,6 +635,9 @@ func (this *DtNavMeshQuery) ClosestPointOnPolyBoundary(ref DtPolyRef, pos, close
 // / Will return #DT_FAILURE if the provided position is outside the xz-bounds
 // / of the polygon.
 // /
+// GetPolyHeight samples the selected polygon, including its boundary. Rounding
+// at an edge is bounded by eight coordinate ULPs, capped at 1/1024 of polygon
+// width and positive agent radius. This is not a gameplay support tolerance.
 func (this *DtNavMeshQuery) GetPolyHeight(ref DtPolyRef, pos []float32, height *float32) DtStatus {
 	if !this.ready() || !finite3(pos) {
 		return DT_FAILURE | DT_INVALID_PARAM
@@ -684,9 +687,88 @@ func (this *DtNavMeshQuery) GetPolyHeight(ref DtPolyRef, pos []float32, height *
 				return DT_SUCCESS
 			}
 		}
+		// Upstream's fallback is restricted to the selected polygon. Do not
+		// turn this into a nearest-floor search when detail triangles miss an
+		// interior point through rounding or degeneracy.
+		var verts [DT_VERTS_PER_POLYGON * 3]float32
+		var distances, fractions [DT_VERTS_PER_POLYGON]float32
+		for i := 0; i < int(poly.VertCount); i++ {
+			DtVcopy(verts[i*3:i*3+3], tile.Verts[int(poly.Verts[i])*3:])
+		}
+		inside := dtDistancePtPolyEdgesSqr(pos[0], pos[2], &verts, int(poly.VertCount), &distances, &fractions)
+		if !inside {
+			// A lerped boundary point can round just outside its own polygon.
+			// Bound this representation error in coordinate ULPs, independently
+			// of gameplay support tolerances or the distance to another floor.
+			ulp := float64(0)
+			area, perimeter := float64(0), float64(0)
+			for i := 0; i < int(poly.VertCount); i++ {
+				j := (i + 1) % int(poly.VertCount)
+				x, z := float64(verts[i*3])-float64(verts[0]), float64(verts[i*3+2])-float64(verts[2])
+				nx, nz := float64(verts[j*3])-float64(verts[0]), float64(verts[j*3+2])-float64(verts[2])
+				area += x*nz - z*nx
+				perimeter += math.Hypot(nx-x, nz-z)
+				for _, axis := range [...]int{0, 2} {
+					value := verts[i*3+axis]
+					ulp = math.Max(ulp, math.Abs(float64(math.Nextafter32(value, float32(math.Inf(1))))-float64(value)))
+				}
+			}
+			// Twice-area/perimeter bounds the narrow dimension, including
+			// long thin polygons. Large local coordinates must not turn their
+			// large ULPs into an appreciable part of a passage's clearance.
+			margin := float64(0)
+			if perimeter > 0 {
+				margin = math.Min(8*ulp, math.Abs(area)/perimeter/1024)
+			}
+			if tile.Header.WalkableRadius > 0 {
+				margin = math.Min(margin, float64(tile.Header.WalkableRadius)/1024)
+			}
+			for i := 0; i < int(poly.VertCount); i++ {
+				inside = inside || float64(distances[i]) <= margin*margin
+			}
+		}
+		if inside {
+			var point [3]float32
+			if closestPointOnDetailEdges(tile, poly, pd, [3]float32{pos[0], pos[1], pos[2]}, &point) {
+				if height != nil {
+					*height = point[1]
+				}
+				return DT_SUCCESS
+			}
+		}
 	}
 
 	return DT_FAILURE | DT_INVALID_PARAM
+}
+
+func closestPointOnDetailEdges(tile *DtMeshTile, poly *DtPoly, detail *DtPolyDetail, pos [3]float32, closest *[3]float32) bool {
+	best := float32(math.MaxFloat32)
+	found := false
+	for i := uint32(0); i < uint32(detail.TriCount); i++ {
+		tri := tile.DetailTris[(detail.TriBase+i)*4:]
+		var vertices [3][3]float32
+		for j := range vertices {
+			if tri[j] < poly.VertCount {
+				DtVcopy(vertices[j][:], tile.Verts[int(poly.Verts[tri[j]])*3:])
+			} else {
+				DtVcopy(vertices[j][:], tile.DetailVerts[(int(detail.VertBase)+int(tri[j])-int(poly.VertCount))*3:])
+			}
+		}
+		for k, j := 0, 2; k < 3; j, k = k, k+1 {
+			if DtGetDetailTriEdgeFlags(tri[3], j)&int(DT_DETAIL_EDGE_BOUNDARY) == 0 && tri[j] < tri[k] {
+				continue
+			}
+			a, b := vertices[j], vertices[k]
+			distance, fraction := dtDistancePtSegSqr2D(pos[0], pos[2], a[0], a[2], b[0], b[2])
+			if distance < best {
+				best, found = distance, true
+				for axis := range closest {
+					closest[axis] = a[axis] + (b[axis]-a[axis])*fraction
+				}
+			}
+		}
+	}
+	return found
 }
 
 type dtFindNearestPolyQuery struct {
@@ -1082,8 +1164,9 @@ func (this *DtNavMeshQuery) FindPath(startRef, endRef DtPolyRef,
 	}
 
 	DtAssert(this.m_nav != nil)
-	DtAssert(this.m_nodePool != nil)
-	DtAssert(this.m_openList != nil)
+	if !this.ensureSearchScratch() {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
 
 	if pathCount != nil {
 		*pathCount = 0
@@ -1313,8 +1396,9 @@ func (this *DtNavMeshQuery) InitSlicedFindPath(startRef, endRef DtPolyRef,
 	}
 
 	DtAssert(this.m_nav != nil)
-	DtAssert(this.m_nodePool != nil)
-	DtAssert(this.m_openList != nil)
+	if !this.ensureSearchScratch() {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
 
 	// Init path state.
 	this.m_query = dtQueryData{}
@@ -2169,7 +2253,9 @@ func (this *DtNavMeshQuery) MoveAlongSurface(startRef DtPolyRef, startPos, endPo
 	}
 
 	DtAssert(this.m_nav != nil)
-	DtAssert(this.m_tinyNodePool != nil)
+	if !this.ensureTinyScratch() {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
 
 	*visitedCount = 0
 
@@ -2649,7 +2735,13 @@ func (this *DtNavMeshQuery) Raycast2(startRef DtPolyRef, startPos, endPos []floa
 	// A straight walkability ray cannot revisit a convex ground polygon.
 	// Bound both malformed runtime graphs and work across unusually long rays.
 	const maxRaycastPolygons = 65536
-	visited := make(map[DtPolyRef]struct{})
+	if this.m_raycastVisited == nil {
+		this.m_raycastVisited = make(map[DtPolyRef]struct{})
+	}
+	visited := this.m_raycastVisited
+	for ref := range visited {
+		delete(visited, ref)
+	}
 	for curRef != 0 {
 		if _, repeated := visited[curRef]; repeated {
 			hit.PathCount = int32(n)
@@ -2895,8 +2987,9 @@ func (this *DtNavMeshQuery) FindPolysAroundCircle(startRef DtPolyRef, centerPos 
 	resultRef, resultParent []DtPolyRef, resultCost []float32,
 	resultCount *int, maxResult int) DtStatus {
 	DtAssert(this.m_nav != nil)
-	DtAssert(this.m_nodePool != nil)
-	DtAssert(this.m_openList != nil)
+	if !this.ensureSearchScratch() {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
 
 	*resultCount = 0
 
@@ -3069,8 +3162,9 @@ func (this *DtNavMeshQuery) FindPolysAroundShape(startRef DtPolyRef, verts []flo
 	resultRef, resultParent []DtPolyRef, resultCost []float32,
 	resultCount *int, maxResult int) DtStatus {
 	DtAssert(this.m_nav != nil)
-	DtAssert(this.m_nodePool != nil)
-	DtAssert(this.m_openList != nil)
+	if !this.ensureSearchScratch() {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
 
 	*resultCount = 0
 
@@ -3224,10 +3318,12 @@ func (this *DtNavMeshQuery) FindPolysAroundShape(startRef DtPolyRef, verts []flo
 // /  @remarks		The result of this function depends on the state of the query object. For that reason it should only
 // /  				be used immediately after one of the two Dijkstra searches, findPolysAroundCircle or findPolysAroundShape.
 func (this *DtNavMeshQuery) GetPathFromDijkstraSearch(endRef DtPolyRef, path []DtPolyRef, pathCount *int, maxPath int) DtStatus {
-	if !this.m_nav.IsValidPolyRef(endRef) || path == nil || pathCount == nil || maxPath < 0 {
+	if pathCount != nil {
+		*pathCount = 0
+	}
+	if !this.ready() || this.m_nodePool == nil || !this.m_nav.IsValidPolyRef(endRef) || path == nil || pathCount == nil || maxPath <= 0 || maxPath > len(path) {
 		return DT_FAILURE | DT_INVALID_PARAM
 	}
-	*pathCount = 0
 
 	var endNode [1]*DtNode
 	if this.m_nodePool.FindNodes(endRef, endNode[:], 1) != 1 ||
@@ -3275,7 +3371,9 @@ func (this *DtNavMeshQuery) FindLocalNeighbourhood(startRef DtPolyRef, centerPos
 	resultRef, resultParent []DtPolyRef,
 	resultCount *int, maxResult int) DtStatus {
 	DtAssert(this.m_nav != nil)
-	DtAssert(this.m_tinyNodePool != nil)
+	if !this.ensureTinyScratch() {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
 
 	*resultCount = 0
 
@@ -3634,8 +3732,9 @@ func (this *DtNavMeshQuery) FindDistanceToWall(startRef DtPolyRef, centerPos []f
 	filter *DtQueryFilter,
 	hitDist *float32, hitPos []float32, hitNormal []float32) DtStatus {
 	DtAssert(this.m_nav != nil)
-	DtAssert(this.m_nodePool != nil)
-	DtAssert(this.m_openList != nil)
+	if !this.ensureSearchScratch() {
+		return DT_FAILURE | DT_INVALID_PARAM
+	}
 
 	// Validate input
 	if startRef == 0 || !this.m_nav.IsValidPolyRef(startRef) {

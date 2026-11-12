@@ -6,8 +6,6 @@ package geom
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -132,7 +130,9 @@ type Scene struct {
 	Links     []Link
 }
 
-// Profile describes physical baked clearance, not runtime avoidance.
+// Profile specifies bake clearance and locomotion limits, not runtime avoidance.
+// Baked boundaries approximate geometry; allow for grid and contour error and
+// validate them against the actual body's collider dimensions.
 type Profile struct {
 	ID                                 string
 	Radius, Height, MaxSlope, MaxClimb float64
@@ -194,20 +194,33 @@ func (s Scene) Clone() Scene {
 // Fingerprint returns a canonical SHA-256 of source content, independent of
 // object/asset list order. Triangle order remains significant.
 func (s Scene) Fingerprint() (string, error) {
-	s = s.Clone()
+	// Sorting owns only the containers; the immutable geometry arrays are read.
+	s.Assets = append([]Asset(nil), s.Assets...)
+	s.Instances = append([]Instance(nil), s.Instances...)
+	s.Volumes = append([]Volume(nil), s.Volumes...)
+	s.Links = append([]Link(nil), s.Links...)
+	for i := range s.Assets {
+		if len(s.Assets[i].Vertices) == 0 {
+			s.Assets[i].Vertices = nil
+		}
+		if len(s.Assets[i].Triangles) == 0 {
+			s.Assets[i].Triangles = nil
+		}
+	}
+	for i := range s.Volumes {
+		if len(s.Volumes[i].Points) == 0 {
+			s.Volumes[i].Points = nil
+		}
+	}
 	sort.Slice(s.Assets, func(i, j int) bool { return s.Assets[i].ID < s.Assets[j].ID })
 	sort.Slice(s.Instances, func(i, j int) bool { return s.Instances[i].ID < s.Instances[j].ID })
 	sort.Slice(s.Volumes, func(i, j int) bool { return s.Volumes[i].ID < s.Volumes[j].ID })
 	sort.Slice(s.Links, func(i, j int) bool { return s.Links[i].ID < s.Links[j].ID })
 	for i := range s.Links {
+		s.Links[i].Profiles = append([]string(nil), s.Links[i].Profiles...)
 		sort.Strings(s.Links[i].Profiles)
 	}
-	data, err := json.Marshal(s)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	return fingerprintScene(s)
 }
 
 // Resolve validates and transforms all sources. Degenerate triangles are
@@ -217,7 +230,7 @@ func (s Scene) Resolve(origin Vec3, strict bool) (Resolved, error) {
 	if !origin.Finite() {
 		return out, fmt.Errorf("geom: invalid origin")
 	}
-	s = s.Clone()
+	s.Instances = append([]Instance(nil), s.Instances...)
 	sort.Slice(s.Instances, func(i, j int) bool { return s.Instances[i].ID < s.Instances[j].ID })
 	assets := map[string]Asset{}
 	ids := map[string]bool{}
@@ -244,6 +257,7 @@ func (s Scene) Resolve(origin Vec3, strict bool) (Resolved, error) {
 		assets[a.ID] = a
 	}
 	ids = map[string]bool{}
+	triangleCapacity := 0
 	for _, obj := range s.Instances {
 		if obj.ID == "" || ids[obj.ID] {
 			return out, fmt.Errorf("geom: duplicate/empty object %q", obj.ID)
@@ -263,9 +277,22 @@ func (s Scene) Resolve(origin Vec3, strict bool) (Resolved, error) {
 		if !finite(det) || det == 0 || t[12] != 0 || t[13] != 0 || t[14] != 0 || t[15] != 1 {
 			return out, fmt.Errorf("geom: object %q requires nonsingular affine transform", obj.ID)
 		}
+		if !obj.Disabled {
+			if len(a.Triangles) > int(^uint(0)>>1)-triangleCapacity {
+				return out, fmt.Errorf("geom: resolved triangle count overflow")
+			}
+			triangleCapacity += len(a.Triangles)
+		}
+	}
+	if triangleCapacity > 0 {
+		out.Triangles = make([]ResolvedTriangle, 0, triangleCapacity)
+	}
+	for _, obj := range s.Instances {
 		if obj.Disabled {
 			continue
 		}
+		a, t := assets[obj.AssetID], obj.Transform
+		det := t.Determinant()
 		for n, tr := range a.Triangles {
 			r := ResolvedTriangle{Area: tr.Area, ObjectID: obj.ID, SourceTriangle: n}
 			for j, idx := range tr.Indices {
@@ -363,16 +390,10 @@ func (s Scene) Resolve(origin Vec3, strict bool) (Resolved, error) {
 	var err error
 	out.Fingerprint, err = s.Fingerprint()
 	if err == nil {
-		data, e := json.Marshal(struct {
-			Triangles []ResolvedTriangle
-			Volumes   []Volume
-			Links     []Link
-		}{out.Triangles, out.Volumes, out.Links})
-		if e != nil {
-			return out, e
+		if len(out.Triangles) == 0 {
+			out.Triangles = nil
 		}
-		sum := sha256.Sum256(data)
-		out.ResolvedFingerprint = hex.EncodeToString(sum[:])
+		out.ResolvedFingerprint, err = fingerprintResolved(out)
 	}
 	return out, err
 }

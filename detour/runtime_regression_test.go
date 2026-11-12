@@ -222,9 +222,41 @@ func TestQueryRejectsInvalidBuffers(t *testing.T) {
 
 func TestNodePoolMemoryAccounting(t *testing.T) {
 	p := DtAllocNodePool(128, 32)
-	want := uint32(unsafe.Sizeof(*p) + 128*unsafe.Sizeof(DtNode{}) + 160*unsafe.Sizeof(DtNodeIndex(0)))
+	want := uint32(unsafe.Sizeof(*p) + unsafe.Sizeof(nodeBlock{}) + 32*unsafe.Sizeof(DtNodeIndex(0)))
 	if p.GetMemUsed() != want {
 		t.Fatalf("got %d want %d", p.GetMemUsed(), want)
+	}
+	p.GetNode(1, 0)
+	want += uint32(128*unsafe.Sizeof(DtNode{}) + 128*unsafe.Sizeof(DtNodeIndex(0)))
+	if p.GetMemUsed() != want {
+		t.Fatalf("allocated block: got %d want %d", p.GetMemUsed(), want)
+	}
+}
+
+func TestPolygonHeightBoundaryMarginIsBounded(t *testing.T) {
+	mesh, q, ref := queryForTile(t, chainTile(t, 1, false, false))
+	x := float32(2)
+	var height float32
+	for i := 0; i < 16; i++ {
+		x = math.Nextafter32(x, float32(math.Inf(1)))
+		status := q.GetPolyHeight(ref, []float32{x, 100, 1}, &height)
+		if i == 0 && (status != DT_SUCCESS || height != 0) {
+			t.Fatal("one-ULP rounded boundary lost its selected polygon height")
+		}
+		if i == 15 && !DtStatusFailed(status) {
+			t.Fatal("height fallback accepted a point outside its bounded polygon margin")
+		}
+	}
+	// Local origins are caller-controlled. At huge coordinates a single ULP
+	// can span this entire polygon; the margin must then cap below that ULP.
+	const offset = float32(1 << 24)
+	for i := 0; i < len(mesh.GetTile(0).Verts); i += 3 {
+		mesh.GetTile(0).Verts[i] += offset
+		mesh.GetTile(0).Verts[i+2] += offset
+	}
+	outside := math.Nextafter32(offset+2, float32(math.Inf(1)))
+	if status := q.GetPolyHeight(ref, []float32{outside, 100, offset}, &height); !DtStatusFailed(status) {
+		t.Fatal("large local-coordinate ULP expanded the polygon's height support")
 	}
 }
 

@@ -74,6 +74,10 @@ unknown fields and writes a completed bundle through a temporary file.
    Radius/height round up to voxel clearance; climb rounds down. Different
    physical profiles generally require separate baked datasets. Area costs and
    avoidance radius cannot replace baked clearance.
+   For repeated builds from the same source, call `bake.PrepareSource` once and
+   reuse its `BuildTiles` method with the same origin and strictness policy.
+   The opaque handle retains resolved geometry and a lazy spatial index;
+   each build still validates its configuration and owns its outputs.
 3. Persist with `artifact.Encode`; load with bounded `artifact.Decode` and
    `navmesh.NewSnapshot`. Artifacts store explicit construction data,
    fingerprints, settings and tile identities, not native pointer layouts.
@@ -82,11 +86,22 @@ unknown fields and writes a completed bundle through a temporary file.
    separate horizontal/up/down limits, then `FindPath`, `Move`, `Height` and
    `Raycast`. Check partial/resource-limited outcomes. Keep surface handles to
    retain floor identity; use bounds and valid hints around stacked floors.
+   `MoveWithoutVisited` omits the owned visited list when the host only needs
+   final support. Scratch and search pools are lazy; give following agents a
+   fresh local query instead of retaining a completed worker's search query.
 5. For world changes, use `dynamic.World.Apply`, call `Prepare` on a host-owned
    worker, then `Commit` on the publication thread. Preparation rebuilds dirty
    columns and assembles an independent snapshot. Readers never observe tile
    mutation. Superseded candidates cannot commit. Retain managed snapshots with
    `Acquire`/`Release`; old handles remain tied to their originating snapshot.
+   `World.Safety()` provides a coherent cached quarantine capture. Check support,
+   corridor and full movement segments before using old geometry. Select
+   `Safety.ForRevision` for the retained lease's generation when using scoped
+   retirement protection. `Query.RebaseUnchangedPath` transfers exact support
+   and a wholly unchanged corridor while preserving corners and steering cursor;
+   `Query.RebasePath` can repair and trim a corridor instead. Release the old
+   lease only after accepting the replacement handles together. See
+   [ownership](docs/OWNERSHIP.md) for the distinction and lease requirements.
 6. Persist `World.Checkpoint` under the host's coordinated checkpoint ID. Restore
    stable desired geometry and streaming intent, then rebuild before making
    agents ready. Runtime polygon references are not durable identities.
@@ -127,6 +142,15 @@ peak memory and tail latency on deployment workloads. There are no published
 agent/world capacity guarantees.
 
 ## Development and validation
+
+`go run ./cmd/navmesh-worldgen -config qualification/configs/terrain.json -out <new-directory>`
+generates deterministic 256-metre terrain sources; `multilevel.json` and
+`construction.json` select stacked structures and mixed dynamic scenes. Seeds,
+two clearance profiles and input hashes are included. Keep generated worlds and
+qualification copies under `C:/Demiurgos/navmesh-validation/world-test`. Golem's
+separate `examples/navigation-stress` runner exercises the actual server against
+these fixtures. Short smoke results do not establish the 1,000-agent acceptance
+target; see the exact candidate's qualification record.
 
 Go 1.20 is the minimum declared language version. CI specifies Go 1.20.14 and
 Go 1.26.4, with Windows/amd64 and Linux/amd64/arm64 checks. These are configured

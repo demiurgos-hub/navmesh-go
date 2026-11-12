@@ -408,13 +408,23 @@ func (b Bundle) validateFingerprints() error {
 	return nil
 }
 
-// Clone copies through the canonical codec, including all geometry arrays.
+// Clone validates and deep-copies geometry with the canonical codec's ordering,
+// empty-array representation and default resource limits.
 func (b Bundle) Clone() (Bundle, error) {
-	data, err := Encode(b)
-	if err != nil {
-		return Bundle{}, err
+	return cloneBundle(b)
+}
+
+// ValidatePortable checks construction inputs, canonical fingerprints and the
+// default portable byte, tile and element limits without copying or mutation.
+// It does not sort collections or normalize empty construction arrays.
+func (b Bundle) ValidatePortable() error {
+	if err := b.Validate(); err != nil {
+		return err
 	}
-	return Decode(data, DefaultLimits())
+	if err := b.validateFingerprints(); err != nil {
+		return err
+	}
+	return cloneLimits(b)
 }
 
 // Validate checks metadata and structural construction inputs without mutation.

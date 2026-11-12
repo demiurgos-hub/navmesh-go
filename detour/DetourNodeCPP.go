@@ -1,4 +1,4 @@
-//
+// Modified Go translation for navmesh-go; see PROVENANCE.md.
 // Copyright (c) 2009-2010 Mikko Mononen memon@inside.org
 //
 // This software is provided 'as-is', without any express or implied
@@ -17,8 +17,6 @@
 //
 
 package detour
-
-import "unsafe"
 
 func DtHashRef(polyRef DtPolyRef) uint32 {
 	a := uint32(polyRef)
@@ -40,28 +38,24 @@ func (this *DtNodePool) constructor(maxNodes, hashSize uint32) {
 	// we have 1 fewer nodes available than the number of values it can contain.
 	DtAssert(this.m_maxNodes > 0 && this.m_maxNodes <= uint32(DT_NULL_IDX) && this.m_maxNodes <= (1<<DT_NODE_PARENT_BITS)-1)
 
-	this.m_nodes = make([]DtNode, this.m_maxNodes)
-	this.m_next = make([]DtNodeIndex, this.m_maxNodes)
+	// Blocks never move their nodes: open queues and sliced searches retain
+	// pointers while more nodes are discovered. Only their descriptors can move.
+	this.m_blocks = make([]nodeBlock, 0, (maxNodes+nodeBlockSize-1)/nodeBlockSize)
 	this.m_first = make([]DtNodeIndex, this.m_hashSize)
-
-	DtAssert(this.m_nodes != nil)
-	DtAssert(this.m_next != nil)
 	DtAssert(this.m_first != nil)
 
 	for i := 0; i < len(this.m_first); i++ {
 		this.m_first[i] = DT_NULL_IDX
 	}
-	for i := 0; i < len(this.m_next); i++ {
-		this.m_next[i] = DT_NULL_IDX
-	}
-
-	this.base = uintptr(unsafe.Pointer(&(this.m_nodes[0])))
 }
 
 func (this *DtNodePool) destructor() {
-	this.m_nodes = nil
+	this.m_blocks = nil
 	this.m_first = nil
-	this.m_next = nil
+}
+
+func (this *DtNodePool) nodeAt(index DtNodeIndex) *DtNode {
+	return &this.m_blocks[int(index)/nodeBlockSize].nodes[int(index)%nodeBlockSize]
 }
 
 func (this *DtNodePool) Clear() {
@@ -76,14 +70,15 @@ func (this *DtNodePool) FindNodes(id DtPolyRef, nodes []*DtNode, maxNodes uint32
 	bucket := DtHashRef(id) & (this.m_hashSize - 1)
 	i := this.m_first[bucket]
 	for i != DT_NULL_IDX {
-		if this.m_nodes[i].Id == id {
+		node := this.nodeAt(i)
+		if node.Id == id {
 			if n >= maxNodes {
 				return n
 			}
-			nodes[n] = &this.m_nodes[i]
+			nodes[n] = node
 			n = n + 1
 		}
-		i = this.m_next[i]
+		i = this.GetNext(int(i))
 	}
 
 	return n
@@ -93,10 +88,11 @@ func (this *DtNodePool) FindNode(id DtPolyRef, state uint8) *DtNode {
 	bucket := DtHashRef(id) & (this.m_hashSize - 1)
 	i := this.m_first[bucket]
 	for i != DT_NULL_IDX {
-		if this.m_nodes[i].Id == id && this.m_nodes[i].State == state {
-			return &this.m_nodes[i]
+		node := this.nodeAt(i)
+		if node.Id == id && node.State == state {
+			return node
 		}
-		i = this.m_next[i]
+		i = this.GetNext(int(i))
 	}
 	return nil
 }
@@ -106,10 +102,11 @@ func (this *DtNodePool) GetNode(id DtPolyRef, state uint8) *DtNode {
 	i := this.m_first[bucket]
 	var node *DtNode = nil
 	for i != DT_NULL_IDX {
-		if this.m_nodes[i].Id == id && this.m_nodes[i].State == state {
-			return &this.m_nodes[i]
+		node := this.nodeAt(i)
+		if node.Id == id && node.State == state {
+			return node
 		}
-		i = this.m_next[i]
+		i = this.GetNext(int(i))
 	}
 
 	if this.m_nodeCount >= this.m_maxNodes {
@@ -117,10 +114,18 @@ func (this *DtNodePool) GetNode(id DtPolyRef, state uint8) *DtNode {
 	}
 
 	i = DtNodeIndex(this.m_nodeCount)
+	if int(i)/nodeBlockSize == len(this.m_blocks) {
+		n := int(this.m_maxNodes) - len(this.m_blocks)*nodeBlockSize
+		if n > nodeBlockSize {
+			n = nodeBlockSize
+		}
+		this.m_blocks = append(this.m_blocks, nodeBlock{nodes: make([]DtNode, n), next: make([]DtNodeIndex, n)})
+	}
 	this.m_nodeCount++
 
 	// Init node
-	node = &this.m_nodes[i]
+	node = this.nodeAt(i)
+	node.poolIndex = i
 	node.Pidx = 0
 	node.Cost = 0
 	node.Total = 0
@@ -128,7 +133,7 @@ func (this *DtNodePool) GetNode(id DtPolyRef, state uint8) *DtNode {
 	node.State = state
 	node.Flags = 0
 
-	this.m_next[i] = this.m_first[bucket]
+	this.m_blocks[int(i)/nodeBlockSize].next[int(i)%nodeBlockSize] = this.m_first[bucket]
 	this.m_first[bucket] = i
 
 	return node
@@ -137,8 +142,7 @@ func (this *DtNodePool) GetNode(id DtPolyRef, state uint8) *DtNode {
 func (this *DtNodeQueue) constructor(n int) {
 	this.m_capacity = n
 	DtAssert(this.m_capacity > 0)
-	this.m_heap = make([]*DtNode, this.m_capacity+1)
-	DtAssert(this.m_heap != nil)
+	this.m_heap = nil
 }
 
 func (this *DtNodeQueue) destructor() {

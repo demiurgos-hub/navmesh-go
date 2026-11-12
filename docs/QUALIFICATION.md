@@ -1,140 +1,112 @@
-# Qualification record and remaining release gates
+# Navigation qualification
 
-This implementation is an unreleased working-tree candidate, not a production
-sign-off. The project has substantially more executable coverage than the initial
-three helper tests, but neither a successful server demo nor a small differential
-corpus proves all navigation geometry correct.
+This is an unpublished working-tree candidate. The requested local 1,000-agent
+qualification is complete with measured limits; separate release gates remain.
+No tag, remote or publication is implied by a local module archive. The
+[initial integration record](qualification/initial-integration-record.md) preserves
+earlier observations; its profile-wide pauses and provisional targets describe
+that earlier implementation, not this candidate.
 
-## Implemented paths
+## Current behavior
 
-- Pure-Go geometry resolution, all Recast stages and partition modes, detail
-  surfaces, heightfield layers, tiled builds, compressed-layer output and CLI.
-- Checked portable artifacts, legacy imports, projection, ordinary/sliced path
-  prefixes, surface movement, height queries, bounded raycasts and corridor repair.
-- Retained source/object state, old/new influence tracking, revisioned private
-  builds, atomic snapshot publication, cancellation/failure preservation, streaming
-  and desired-state checkpoints.
-- Separate Golem surface contracts/adapter, bounded independent queues, managed
-  movement/body boundary, traversal lifecycle, readiness/checkpoints and a runnable
-  server demonstration. Existing 2D backends remain separate.
-- Explicit Scribe mesh/terrain/instance/area/exclusion/link authoring and source
-  export. Collision footprints remain collision-only.
-- Runtime/bake diagnostics, upstream mapping/provenance, optional actual C++
-  comparisons, pure-Go CI, fuzz/race/checkptr lanes and dependency auditing.
+Production runtime and baking use `CGO_ENABLED=0`. Regional safety quarantines
+changed tile columns across all floors and bake/clearance influence. Failure and
+cancellation retain quarantine. Golem keeps unaffected agents moving and transfers
+unchanged support/corridors to the latest view, preserving floor identity and intent.
+Missing profiles and restoration remain global barriers. Other backends can retain
+conservative profile-wide pauses.
 
-The low-level cache has overlap/removal, malformed compression, empty-tile,
-capacity and failure/retry regressions. Production dynamic updates deliberately
-use full source rebuilding. Automatic cache selection and broad cache-vs-source
-clearance/height parity are not implemented or claimed.
+Following queries own bounded local scratch separately from job-owned search memory.
+Returned paths, corners, links, dependencies and visited lists remain independent
+of later queries. Ordinary tests enforce warm scratch allocation counts; race and
+checkptr instrumentation qualify correctness separately.
 
-## Evidence captured during implementation
+## Workload and evidence
 
-Windows development used Go 1.26.4, with ordinary `CGO_ENABLED=0`, `GOWORK=off`
-tests. The full module also passed on the declared Go 1.20.14 minimum. Separate
-Windows race runs used `CGO_ENABLED=1` and a C compiler; the instrumentation is
-not an ordinary runtime dependency. Vet and checkptr are additional lanes, not
-substitutes for geometry assertions.
+Reusable generation lives in `qualification/worldgen` and `cmd/navmesh-worldgen`.
+The actual Server runner, staging and release tools live in Golem Engine's
+`examples/navigation-stress` and `qualification`. Canonical configurations and
+reduced regressions are ordinary Git files. All generated execution material lives
+in `C:/Demiurgos/navmesh-validation/world-test`, or the corresponding `/mnt/c/...`
+path under Ubuntu/WSL: `worlds`, `workspaces`, `bin`, `scratch`, `cache` and `runs`.
 
-The final 13-package library matrix passed on Windows/amd64 with Go 1.20.14 and
-1.26.4, with separate race and checkptr runs on 1.26.4. Windows/386 binaries also
-executed successfully on the development host. Linux/amd64 test executables were
-cross-built by Go and actually executed in the installed Ubuntu/WSL environment,
-from each package's correct working directory. Linux/arm64 was compilation-only.
-Hosted CI and native Linux/arm64 execution remain release gates.
+The requested workload scope is 1,000 active agents at 20 Hz only. On 2026-11-11,
+the user excluded future 100-agent and 5,000-agent tiers from this pass. They are
+excluded work, not failed or pending qualification; historical evidence is preserved.
+Seeded 256-metre terrain, multilevel and construction families use positive and
+negative coordinates and two clearance profiles. Defaults are 10% destination
+replacement per second, two geometry edits per second and periodic 20-edit bursts.
+On each platform, run the three family cases at 1,000 agents with two minutes
+of warm-up and ten measured minutes each. Then run one two-hour
+construction/streaming soak at the same population. The separate static Capacity
+case also uses 1,000 agents. Short rehearsals do not qualify these durations.
+Both static Capacity runs, all three mixed cases and both two-hour soaks have
+completed on Windows/amd64 and native Ubuntu/WSL Linux/amd64. Golem Engine's
+`qualification/REPORT.md` records their exact candidates and outcomes. The
+static cases kept all 1,000 actors moving on each measured tick; mixed soaks had
+many quarantined or stationary actors and do not establish that same capacity.
 
-The optional oracle was built from pinned upstream
-`9f4ce64458dfae86e1239c525ddc219c4e9e06f1`. It executes C++ Recast/Detour and Go on
-identical inputs; the final 24-case suite passed across all partition modes with
-93 query probes. Its checked-in protocol and fixtures cover stacked
-surfaces/holes, slopes, padded tiles, clearance thresholds, wavy detail surfaces,
-projection, paths and raycasts.
-The manifest records deliberate polygon-edge height-query divergence. It is not
-a claim of arbitrary C++ binary compatibility or exhaustive algorithm parity.
+Navigation p99 ≤5 ms remains the recorded performance target. The user waived
+meeting it as a completion blocker; measured values and target failures remain in
+the evidence. Both static Capacity runs and the three Windows mixed cases
+missed this target; the three Linux mixed cases and both soaks met it within
+their measured activity mixes. Whole-tick overruns and tick-count deficits remain
+reported separately; passing navigation timing does not prove perfect 20 Hz
+wall-clock cadence. Correctness, successful request-to-admission p99 ≤100 ms outside
+observed quarantine, unaffected-agent cadence, bounded generations, drained memory
+returning to the recorded steady-state envelope, platform checks, and the full
+workload and soak durations remain required. Failed, cancelled, superseded and
+unresolved requests are recorded separately. Budgets cannot improve reported timing
+by starving agents. Timing runs exclude simultaneous fuzzing and benchmarks.
 
-Decoder/compression/raster fuzzing received bounded local smoke runs, including
-approximately 366,000 artifact inputs in one 11-second run. A weekly/manual
-workflow runs eight bounded targets and preserves failures. The final checkpoint
-decoder smoke run passed approximately 203,000 guided inputs in five seconds,
-including checksum-resealed malformed bodies. These short observations
-do not replace sustained fuzzing before a production release.
+Golem's Windows budgets and interval observations use `NavigationNow`, backed by
+the high-resolution performance counter. Pair timestamps from that clock with
+`Time.Sub`; do not mix them with `time.Since`, `time.Until` or ordinary `time.Now`
+readings. Civil timestamps and runtime GC wall-time correlation are recorded
+separately; that correlation is approximate. Earlier Windows rehearsals using
+coarse ordinary clock readings remain historical evidence, not directly
+comparable measurements or proof of the required gates. Preserve the exact
+clock implementation and candidate manifest with each timing result.
 
-Scribe's portable tests and real Unity 6000.3.13f1 EditMode tests passed, including
-the new navigation exporter. An actual C#-produced JSON fixture was consumed by
-the Go baker. Unity 2021.3, the package's older supported baseline, was not installed
-and is not qualified by the Unity 6 run.
+Support tolerance is an explicit fixture setting aligned with bake error and below
+distinct-floor separation. The Golem default remains 0.05 metres. A reconstructed
+terrain edit moved baked support down 0.056493 m at the same XZ with 0.1 m allowed
+detail error, so strict default rejection was correct. Qualification uses cell height
+plus detail error (0.2 m), with a separate removed-floor no-auto-snap regression.
+This does not change the tick, path, cadence or ownership gates.
 
-Golem standalone checks use temporary candidate module archives and isolated
-module caches because the new versions have not been published. Those checks
-must not be represented as proof that the published versions exist. No local
-workspace file or new local replacement directive is part of this change.
+## Reproducible checks
 
-After Bitdefender interrupted temporary Windows test executables, local runs
-resumed from fixed executable paths inside the user-excepted validation folder.
-Four code-generation consumer checks were re-qualified with their temporary
-Go/C# executables confined to that folder. The final run still excludes
-`TestUnityRuntimePolicyConsumer`, whose .NET testhost location was not confirmed,
-and reports the temporary checkout's existing optional dependency/privilege
-skips. One unchanged WebTransport timing test failed
-under load, then passed three isolated runs and a full package retry; retain the
-failure as a timing-flake observation, not a navigation correction. The latest
-server navigation, adapter, source builder and demonstration passed ordinary,
-race and checkptr runs on Windows and native Linux/amd64 execution through WSL.
-The final website build, server lifecycle demonstration and generated consumer
-checks passed. These checks include bounded rebuild debounce/retry and physical
-body offsets during surface steering and landing. They use refreshed candidate
-archives rather than published module versions. Windows and Linux CLI bakes of
-the actual Scribe fixture produced identical 14,255-byte artifacts.
+1. Stage exact sources using Golem Engine's `qualification/stage.py`. Use `GOWORK=off`
+   and keep candidate checksums/overrides in validation copies.
+2. Run ordinary tests, vet and checkptr for the library, shared nav, adapter, engine
+   and both navigation consumers. Check library Go 1.20.14, shared nav/adapter
+   Go 1.25.0, engine/consumers Go 1.25.4 and current Go 1.26.4. Race instrumentation
+   is a separate lane with its required C compiler.
+3. Run the standalone C++ oracle pinned to
+   `9f4ce64458dfae86e1239c525ddc219c4e9e06f1`. The expanded corpus has 39 cases
+   and 150 runtime probes; it is not exhaustive parity or arbitrary binary compatibility.
+4. Fuzz every listed target for ten minutes with bounded workers and preserve crashes.
+   Run baseline/candidate microbenchmarks in a separate quiet window.
+5. Execute Windows/amd64 and native Ubuntu/WSL Linux/amd64 workloads and available
+   Unity 6 authoring/export/bake checks. Retain hardware, toolchains, exact commands,
+   source/input/executable hashes, settings, worker counts, results and exclusions.
+6. Index evidence and update Golem Engine's final qualification report. Failed
+   rehearsals remain evidence; passing unit tests do not replace workload gates.
 
-## Performance observations
+## Separate release gates
 
-The checked-in benchmarks cover full baking, affected-tile rebuild/publication,
-projection, paths and surface movement. Golem exposes queue/work/completion
-latency histograms and maxima separately from the general task pool.
+Publication remains a later action: navmesh-go `v0.1.0` and shared nav
+`golem/nav/v0.4.0`, adapter `golem/nav/navmesh/v0.1.0`, engine `v0.4.0`, then clean
+consumers with genuine published checksums. See Golem Engine's
+`qualification/RELEASE.md`. Private archives do not prove published resolution.
 
-One development smoke run on an Intel Core Ultra 9 275HX, Windows/amd64, used the
-16-column ground/bridge fixture. Across three 200ms benchmark samples it observed:
+Native ARM64, Unity 2021.3 and hosted execution remain pending. Linux server
+navigation checks are separate from the root repository's existing Ebiten graphics
+dependency, which requires cgo there. Earlier unrelated networking test failures
+remain visible as historical records; the final documented server-package
+matrices passed at their attributed source identities.
 
-| Operation | Observed mean range | Allocated bytes/operation |
-| --- | --- | --- |
-| Projection | 4.1–4.8 microseconds | 16,672 |
-| Path | 7.0–10.2 microseconds | 17,680 |
-| Local move | 4.7–8.3 microseconds | 8,608 |
-| Full fixture bake | 3.2–3.6 milliseconds | about 2.13 MiB |
-| Affected rebuild plus private assembly | 2.5–2.7 milliseconds | about 1.13 MiB |
-
-This run overlapped development/fuzz activity and preceded final hardening. It
-is a smoke observation, not a reproducible release baseline, peak-memory estimate,
-tail-latency result or agent-capacity claim. Rerun on an otherwise idle machine
-against the exact release candidate and representative geometry.
-
-## Required before production sign-off
-
-1. Select the actual world, server hardware, tick rate, agent count, destination
-   churn, geometry-update bursts and streaming workload. Measure p50/p95/p99,
-   worst observed latency, peak RSS/heap, allocations, retained snapshots and
-   tick interference. The plan's p99 tick <=2ms and query <=100ms targets remain
-   provisional until that workload is approved and measured.
-2. Expand the corpus beyond the current synthetic fixtures: representative stairs,
-   spirals, detailed terrain, caves, dense multilayer buildings, profile thresholds,
-   seams, construction/destruction and mixed traversal. Run sustained fuzzing and
-   stateful restart/update/unload fault injection at deployment scale.
-3. Run the hosted platform matrix, native Linux/arm64 and the Unity version(s)
-   claimed for shipping. Add sanitizer runs for the optional C++ oracle where
-   supported. Record exact source commits, toolchains and comparison input hashes.
-4. Verify queue/snapshot memory bounds and long-duration fairness under overload.
-   The initial Golem quarantine pauses a complete profile; tile-specific quarantine
-   and snapshot geometry sharing are future optimizations, not correctness promises.
-5. Confirm publication destination/visibility. Publish navmesh-go and the shared
-   navigation module, then adapter/root consumers in dependency order; update
-   real sums and rerun clean `GOWORK=off` consumers against published archives.
-   Confirm fixtures arrive as real bytes, not LFS pointers.
-6. Review the new APIs and format before tagging them. Align README, godoc, Golem
-   rules/changelog, website docs and supported-platform claims with observed gates.
-
-Optional local avoidance, automatic cache acceleration, broad legacy binary
-compatibility, cross-region hierarchical routing and copy-on-write snapshot
-optimization are not required to use the authoritative source-rebuild path.
-
-Use `docs/OWNERSHIP.md` for concurrency/host responsibilities and `docs/FORMAT.md`
-for artifact compatibility. The implementation makes broader Golem integration
-possible; full production readiness requires the evidence above.
+Automatic cache selection, cross-request search pooling, a mutable public corridor
+API, safe-prefix movement toward quarantine and cross-region hierarchical routing
+remain outside this pass. See [ownership](OWNERSHIP.md) and [format](FORMAT.md).

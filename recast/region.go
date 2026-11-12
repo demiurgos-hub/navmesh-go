@@ -1178,7 +1178,7 @@ func BuildDistanceField(ctx context.Context, chf *CompactHeightfield) {
 	boxBlur(chf, 1, src, dst)
 
 	// Store distance.
-	chf.Dist = src
+	chf.Dist = dst
 }
 
 // BuildRegionsMonotone partitions the heightfield into monotone regions.

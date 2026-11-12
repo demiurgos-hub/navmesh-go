@@ -3,11 +3,13 @@ package recast
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"testing"
 )
@@ -19,12 +21,13 @@ func TestUpstreamOracle(t *testing.T) {
 	if exe == "" {
 		t.Skip("set NAVMESH_RECAST_ORACLE to the separately built pinned C++ runner")
 	}
-	for _, scene := range []string{"floor", "slope", "stacked-hole", "padded-tile", "step-above", "radius-safe", "radius-thin", "wavy-detail"} {
+	for _, scene := range []string{"floor", "slope", "stacked-hole", "padded-tile", "step-above", "radius-safe", "radius-thin", "wavy-detail", "stairs", "negative-stairs", "stacked-three", "narrow-seam", "terrain-border-vertex"} {
 		for _, mode := range []Partition{Monotone, Watershed, LayerRegions} {
 			t.Run(fmt.Sprintf("%s/%d", scene, mode), func(t *testing.T) {
 				cfg := buildTestConfig()
 				var verts []float32
 				var tris []int
+				var areas []uint8
 				addTestFloor(&verts, &tris, -6, -6, 6, 6, 0)
 				opt := BuildOptions{Partition: mode, BuildLayers: true}
 				if scene == "slope" {
@@ -66,6 +69,66 @@ func TestUpstreamOracle(t *testing.T) {
 					}
 				}
 				probes := runtimeOracleProbes(scene)
+				if scene == "terrain-border-vertex" {
+					fixture := readTerrainBorderTile(t)
+					cfg, verts, tris, areas, opt = fixture.Config, fixture.Vertices, fixture.Triangles, fixture.Areas, fixture.Options
+					opt.Partition = mode
+					probes = []runtimeOracleProbe{
+						{Start: [3]float32{-110.125, 0, -110.125}, End: [3]float32{-97.875, 0, -97.875}, Extents: [3]float32{.1, 2, .1}},
+						{Start: [3]float32{-110.125, 0, -110.125}, End: [3]float32{-108.125, 0, -110.125}, Extents: [3]float32{.1, 2, .1}},
+						{Start: [3]float32{-98.125, 0, -98.125}, End: [3]float32{-98.125, 0, -100.125}, Extents: [3]float32{.1, 2, .1}},
+						{Start: [3]float32{-110.125, 0, -110.125}, End: [3]float32{-90, 0, -110.125}, Extents: [3]float32{.1, 2, .1}},
+					}
+				}
+				if scene == "stairs" || scene == "negative-stairs" {
+					verts, tris = nil, nil
+					for step := 0; step < 6; step++ {
+						addTestFloor(&verts, &tris, -6+2*float32(step), -6, -4+2*float32(step), 6, .2*float32(step))
+					}
+					probes = []runtimeOracleProbe{
+						{Start: [3]float32{-4.875, .1, -3.875}, End: [3]float32{4.875, 1.1, 3.875}, Extents: [3]float32{.1, .3, .1}},
+						{Start: [3]float32{4.875, 1.1, 3.875}, End: [3]float32{-4.875, .1, -3.875}, Extents: [3]float32{.1, .3, .1}},
+						{Start: [3]float32{-.875, .5, .125}, End: [3]float32{2.875, .9, .125}, Extents: [3]float32{.1, .3, .1}},
+					}
+					if scene == "negative-stairs" {
+						offset := [3]float32{-64, -4, -32}
+						for i := range verts {
+							verts[i] += offset[i%3]
+						}
+						for axis, delta := range offset {
+							cfg.Bmin[axis] += delta
+							cfg.Bmax[axis] += delta
+							for i := range probes {
+								probes[i].Start[axis] += delta
+								probes[i].End[axis] += delta
+							}
+						}
+					}
+				}
+				if scene == "stacked-three" {
+					addTestFloor(&verts, &tris, -4, -4, 4, 4, 3)
+					addTestFloor(&verts, &tris, -2, -2, 2, 2, 6)
+					probes = []runtimeOracleProbe{
+						{Start: [3]float32{-.875, .1, -.875}, End: [3]float32{.875, .1, .875}, Extents: [3]float32{.1, .3, .1}},
+						{Start: [3]float32{-.875, 3.1, -.875}, End: [3]float32{.875, 3.1, .875}, Extents: [3]float32{.1, .3, .1}},
+						{Start: [3]float32{-.875, 6.1, -.875}, End: [3]float32{.875, 6.1, .875}, Extents: [3]float32{.1, .3, .1}},
+						{Start: [3]float32{.125, .1, .125}, End: [3]float32{.125, 3.1, .125}, Extents: [3]float32{.1, .3, .1}},
+						{Start: [3]float32{.125, 6.1, .125}, End: [3]float32{.125, 3.1, .125}, Extents: [3]float32{.1, .3, .1}},
+						{Start: [3]float32{.125, 6.1, .125}, End: [3]float32{5, 6.1, .125}, Extents: [3]float32{.1, .3, .1}},
+					}
+				}
+				if scene == "narrow-seam" {
+					verts, tris = nil, nil
+					addTestFloor(&verts, &tris, -6, -5, -1, 5, 0)
+					addTestFloor(&verts, &tris, 1, -5, 6, 5, 0)
+					addTestFloor(&verts, &tris, -1, -.875, 0, .875, 0)
+					addTestFloor(&verts, &tris, 0, -.875, 1, .875, 0)
+					probes = []runtimeOracleProbe{
+						{Start: [3]float32{-4.875, .1, .125}, End: [3]float32{4.875, .1, .125}, Extents: [3]float32{.1, .3, .1}},
+						{Start: [3]float32{-4.875, .1, 3.125}, End: [3]float32{4.875, .1, 3.125}, Extents: [3]float32{.1, .3, .1}},
+						{Start: [3]float32{-.125, .1, .125}, End: [3]float32{.125, .1, .125}, Extents: [3]float32{.1, .3, .1}},
+					}
+				}
 				if scene == "wavy-detail" {
 					verts, tris = nil, nil
 					for z := 0; z <= 12; z++ {
@@ -89,7 +152,7 @@ func TestUpstreamOracle(t *testing.T) {
 						probes[i].End[1] = float32(oracleWaveHeight(float64(probes[i].End[0]), float64(probes[i].End[2]))) + .1
 					}
 				}
-				got, goErr := Build(context.Background(), cfg, verts, tris, nil, opt)
+				got, goErr := Build(context.Background(), cfg, verts, tris, areas, opt)
 				var in bytes.Buffer
 				fmt.Fprintf(&in, "1 %d 1\n%d %d %d %.9g %.9g\n", mode, cfg.Width, cfg.Height, cfg.BorderSize, cfg.Cs, cfg.Ch)
 				for _, v := range cfg.Bmin {
@@ -108,7 +171,11 @@ func TestUpstreamOracle(t *testing.T) {
 				}
 				fmt.Fprintln(&in)
 				for i := 0; i < len(tris)/3; i++ {
-					fmt.Fprint(&in, "63 ")
+					area := uint8(WalkableArea)
+					if areas != nil {
+						area = areas[i]
+					}
+					fmt.Fprintf(&in, "%d ", area)
 				}
 				fmt.Fprintln(&in)
 				fmt.Fprintln(&in, len(opt.Volumes))
@@ -135,6 +202,7 @@ func TestUpstreamOracle(t *testing.T) {
 					}
 					fmt.Fprintln(&in)
 				}
+				t.Logf("oracle input sha256=%x probes=%d", sha256.Sum256(in.Bytes()), len(probes))
 				cmd := exec.Command(exe)
 				cmd.Stdin = &in
 				var stderr bytes.Buffer
@@ -142,6 +210,24 @@ func TestUpstreamOracle(t *testing.T) {
 				out, err := cmd.Output()
 				if err != nil {
 					t.Fatalf("oracle: %v: %s", err, stderr.String())
+				}
+				if root := os.Getenv("NAVMESH_ORACLE_ARTIFACTS"); root != "" {
+					name := filepath.Join(root, fmt.Sprintf("%s-%d", scene, mode))
+					if err := os.MkdirAll(name, 0755); err != nil {
+						t.Fatal(err)
+					}
+					goData, err := json.Marshal(struct {
+						Config Config
+						Result *BuildResult
+					}{cfg, got})
+					if err != nil {
+						t.Fatal(err)
+					}
+					for file, data := range map[string][]byte{"input.txt": in.Bytes(), "cpp.json": out, "go.json": goData} {
+						if err := os.WriteFile(filepath.Join(name, file), data, 0644); err != nil {
+							t.Fatal(err)
+						}
+					}
 				}
 				var reference struct {
 					Reference   string
@@ -168,7 +254,19 @@ func TestUpstreamOracle(t *testing.T) {
 				if reference.Layers != got.Layers.NLayers {
 					t.Fatalf("layer count: go=%d cpp=%d", got.Layers.NLayers, reference.Layers)
 				}
-				compareRuntimeOracle(t, runRuntimeOracle(t, cfg, got, probes), reference.Probes, probes, scene != "radius-thin")
+				if scene == "stairs" || scene == "negative-stairs" {
+					for _, p := range reference.Probes {
+						if !p.Complete {
+							t.Fatal("stair fixture must exercise traversable height changes")
+						}
+					}
+				}
+				if scene == "stacked-three" && (reference.Layers != 3 || !reference.Probes[3].Partial || !reference.Probes[4].Partial) {
+					t.Fatal("stacked fixture must preserve three disconnected floors")
+				}
+				if scene == "narrow-seam" && (!reference.Probes[0].Complete || !reference.Probes[2].Complete || !reference.Probes[1].Hit) {
+					t.Fatal("seam fixture must retain the narrow connection and block the off-passage ray")
+				}
 				if (scene == "stacked-hole" || scene == "step-above") && !reference.Probes[2].Partial {
 					t.Fatal("reference stacked-floor probe did not exercise a partial route")
 				}
@@ -188,6 +286,7 @@ func TestUpstreamOracle(t *testing.T) {
 						}
 					}
 				}
+				compareRuntimeOracle(t, runRuntimeOracle(t, cfg, got, probes), reference.Probes, probes, scene != "radius-thin")
 			})
 		}
 	}

@@ -67,6 +67,13 @@ func (s Surface) Revision() uint64 {
 // Valid reports whether this is a nonzero surface handle.
 func (s Surface) Valid() bool { return s.snapshot != nil && s.ref != 0 }
 
+// SamePolygon reports exact support identity within one immutable snapshot.
+// Both handles must be valid and have finite positions. It does not select a
+// floor, compare world proximity, or equate references from different snapshots.
+func (s Surface) SamePolygon(other Surface) bool {
+	return s.Valid() && other.Valid() && s.position.Finite() && other.position.Finite() && s.snapshot == other.snapshot && s.ref == other.ref
+}
+
 // Filter is copied into query-owned Detour state. Zero IncludeFlags means all.
 type Filter struct {
 	IncludeFlags, ExcludeFlags uint16
@@ -106,6 +113,8 @@ type Traversal struct {
 }
 
 // Corner is a straight-path target; Link requires host-controlled traversal.
+// Ground endpoints retain their selected surface height. Intermediate corners
+// follow polygon portals; authored traversal anchors retain their own positions.
 type Corner struct {
 	Position Vec3
 	Link     *Traversal
@@ -123,25 +132,87 @@ type Path struct {
 
 // Corners returns a deep copy of steering targets.
 func (p *Path) Corners() []Corner {
-	if p == nil {
-		return nil
-	}
-	out := append([]Corner(nil), p.corners...)
-	for i := range out {
-		if out[i].Link != nil {
-			v := *out[i].Link
-			out[i].Link = &v
+	return p.AppendCorners(nil)
+}
+
+// AppendCorners appends independently owned steering targets to dst. It reuses
+// dst's capacity, but link pointers are copied so callers cannot mutate the path.
+func (p *Path) AppendCorners(dst []Corner) []Corner {
+	if p != nil {
+		first := len(dst)
+		dst = append(dst, p.corners...)
+		for i := first; i < len(dst); i++ {
+			if dst[i].Link != nil {
+				link := *dst[i].Link
+				dst[i].Link = &link
+			}
 		}
 	}
-	return out
+	return dst
+}
+
+// CornerCount returns the number of steering targets, or zero for a nil path.
+func (p *Path) CornerCount() int {
+	if p == nil {
+		return 0
+	}
+	return len(p.corners)
+}
+
+// CornerAt returns an independently owned target, or false for an invalid index.
+// Use CornerValueAt to inspect links without allocating a copied link pointer.
+func (p *Path) CornerAt(index int) (Corner, bool) {
+	if p == nil || index < 0 || index >= len(p.corners) {
+		return Corner{}, false
+	}
+	c := p.corners[index]
+	if c.Link != nil {
+		link := *c.Link
+		c.Link = &link
+	}
+	return c, true
+}
+
+// CornerValueAt returns a target and its optional traversal entirely by value.
+// The third return value reports a traversal; the fourth reports a valid index.
+func (p *Path) CornerValueAt(index int) (Vec3, Traversal, bool, bool) {
+	if p == nil || index < 0 || index >= len(p.corners) {
+		return Vec3{}, Traversal{}, false, false
+	}
+	c := p.corners[index]
+	if c.Link != nil {
+		return c.Position, *c.Link, true, true
+	}
+	return c.Position, Traversal{}, false, true
 }
 
 // Tiles returns a copy of dependency revisions.
 func (p *Path) Tiles() []TileRevision {
-	if p == nil {
-		return nil
+	return p.AppendTiles(nil)
+}
+
+// AppendTiles appends dependency revisions to dst, reusing its capacity.
+func (p *Path) AppendTiles(dst []TileRevision) []TileRevision {
+	if p != nil {
+		dst = append(dst, p.tiles...)
 	}
-	return append([]TileRevision(nil), p.tiles...)
+	return dst
+}
+
+// TileCount returns the number of dependency revisions, or zero for a nil path.
+func (p *Path) TileCount() int {
+	if p == nil {
+		return 0
+	}
+	return len(p.tiles)
+}
+
+// TileAt returns a dependency revision by value, or false for an invalid index.
+func (p *Path) TileAt(index int) (TileRevision, bool) {
+	if p == nil || index < 0 || index >= len(p.tiles) {
+		return TileRevision{}, false
+	}
+	return p.tiles[index], true
 }
 
 // End returns the reachable endpoint, which may differ from the requested goal.
@@ -182,11 +253,13 @@ type RaycastResult struct {
 
 // Snapshot owns an immutable runtime mesh and all its neighboring links.
 type Snapshot struct {
-	mesh       *detour.DtNavMesh
-	bundle     artifact.Bundle
-	tiles      map[artifact.TileKey]uint64
-	links      map[uint32]geom.Link
-	incomplete bool
+	identity     *snapshotIdentity
+	mesh         *detour.DtNavMesh
+	bundle       artifact.Bundle
+	tiles        map[artifact.TileKey]uint64
+	links        map[uint32]geom.Link
+	dependencies []surfaceTileDependency
+	incomplete   bool
 }
 
 // NewSnapshot validates and copies a bundle, assembling every tile privately.
@@ -196,10 +269,17 @@ func NewSnapshot(b artifact.Bundle) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	return assembleSnapshot(b)
+}
+
+// assembleSnapshot takes canonical, validated construction data. Nested arrays
+// must be privately owned or immutable data shared from another snapshot. The
+// runtime mesh and every mutable tile payload are always built independently.
+func assembleSnapshot(b artifact.Bundle) (*Snapshot, error) {
 	if b.Revision == 0 {
 		b.Revision = 1
 	}
-	s := &Snapshot{bundle: b, mesh: detour.DtAllocNavMesh(), tiles: map[artifact.TileKey]uint64{}, links: map[uint32]geom.Link{}}
+	s := &Snapshot{identity: &snapshotIdentity{}, bundle: b, mesh: detour.DtAllocNavMesh(), tiles: map[artifact.TileKey]uint64{}, links: map[uint32]geom.Link{}}
 	maxPolys := uint32(1)
 	for _, t := range b.Tiles {
 		n := uint32(t.Parameters.PolyCount + t.Parameters.OffMeshConCount)
@@ -217,6 +297,7 @@ func NewSnapshot(b artifact.Bundle) (*Snapshot, error) {
 	if detour.DtStatusFailed(status) {
 		return nil, fmt.Errorf("navmesh: tile/reference capacity exceeded (%#x)", status)
 	}
+	s.dependencies = make([]surfaceTileDependency, n)
 	for _, t := range b.Tiles {
 		if t.Empty {
 			continue
@@ -230,9 +311,13 @@ func NewSnapshot(b artifact.Bundle) (*Snapshot, error) {
 		if err := detour.ValidateNavMeshData(data); err != nil {
 			return nil, err
 		}
-		if st := s.mesh.AddTile(data, size, detour.DT_TILE_FREE_DATA, 0, nil); detour.DtStatusFailed(st) {
+		var tileRef detour.DtTileRef
+		if st := s.mesh.AddTile(data, size, detour.DT_TILE_FREE_DATA, 0, &tileRef); detour.DtStatusFailed(st) {
 			return nil, fmt.Errorf("navmesh: add tile %v: %#x", t.Key, st)
 		}
+		slot := s.mesh.DecodePolyIdTile(detour.DtPolyRef(tileRef))
+		tile := s.mesh.GetTile(int(slot))
+		s.dependencies[slot] = surfaceTileDependency{tile: TileRevision{Key: t.Key, Revision: t.Revision}, first: detour.DtPolyRef(tileRef), count: uint32(tile.Header.PolyCount)}
 	}
 	for _, l := range b.Links {
 		s.links[geom.LinkKey(l.ID)] = l
@@ -270,7 +355,11 @@ func (s *Snapshot) Profile() geom.Profile { return s.bundle.Profile }
 // Bundle returns an independent copy suitable for persistence or a new build.
 func (s *Snapshot) Bundle() (artifact.Bundle, error) { return s.bundle.Clone() }
 
-// NewQuery allocates exclusively owned scratch for an immutable snapshot.
+// NewQuery creates an exclusive query for an immutable snapshot. Result arrays
+// and search scratch are allocated lazily within l's bounds and reused by
+// later calls. Search nodes grow in stable blocks and the open queue grows only
+// as needed. Projection and local movement do not allocate the search pool.
+// Detour's fixed local traversal and raycast bounds still apply.
 func (s *Snapshot) NewQuery(l Limits) (*Query, error) {
 	if s == nil {
 		return nil, errors.New("navmesh: nil snapshot")
@@ -292,6 +381,8 @@ func (s *Snapshot) NewQuery(l Limits) (*Query, error) {
 		return nil, errors.New("navmesh: invalid query limits")
 	}
 	q := &Query{snapshot: s, limits: l, query: detour.DtAllocNavMeshQuery()}
+	q.filter.Reset()
+	q.defaultCosts = true
 	if st := q.query.Init(s.mesh, l.Nodes); detour.DtStatusFailed(st) {
 		return nil, fmt.Errorf("navmesh: query init %#x", st)
 	}
@@ -300,10 +391,30 @@ func (s *Snapshot) NewQuery(l Limits) (*Query, error) {
 
 // Query owns nonconcurrent scratch. Concurrent/reentrant use returns an error.
 type Query struct {
-	snapshot *Snapshot
-	query    *detour.DtNavMeshQuery
-	limits   Limits
-	busy     uint32
+	snapshot     *Snapshot
+	query        *detour.DtNavMeshQuery
+	limits       Limits
+	busy         uint32
+	filter       detour.DtQueryFilter
+	defaultCosts bool
+	refs         []detour.DtPolyRef
+	visited      []detour.DtPolyRef
+	merged       []detour.DtPolyRef
+	points       []float32
+	flags        []detour.DtStraightPathFlags
+	cornRefs     []detour.DtPolyRef
+	seenTiles    map[artifact.TileKey]struct{}
+	tiles        []TileRevision
+}
+
+// Scratch never escapes a query call; paths and visited surfaces own their data.
+func resizeScratch[T any](p *[]T, n int) []T {
+	if cap(*p) < n {
+		*p = make([]T, n)
+	} else {
+		*p = (*p)[:n]
+	}
+	return *p
 }
 
 func (q *Query) begin(ctx context.Context) Status {
@@ -346,8 +457,24 @@ func (q *Query) world(v [3]float32) Vec3 {
 	o := q.snapshot.bundle.Settings.Origin
 	return Vec3{X: float64(v[0]) + o.X, Y: float64(v[1]) + o.Y, Z: float64(v[2]) + o.Z}
 }
-func (f Filter) detour() (*detour.DtQueryFilter, error) {
-	d := detour.DtAllocDtQueryFilter()
+func (q *Query) detourFilter(f Filter) (*detour.DtQueryFilter, error) {
+	d := &q.filter
+	if f.AreaCosts == [64]float32{} {
+		if !q.defaultCosts {
+			d.Reset()
+			q.defaultCosts = true
+		}
+		include := f.IncludeFlags
+		if include == 0 {
+			include = 65535
+		}
+		d.SetIncludeFlags(include)
+		d.SetExcludeFlags(f.ExcludeFlags)
+		return d, nil
+	}
+	// An invalid custom filter can return after partially replacing costs.
+	// The next default filter must reset that state too.
+	q.defaultCosts = false
 	include := f.IncludeFlags
 	if include == 0 {
 		include = 65535
@@ -377,6 +504,8 @@ func (q *Query) loaded(p Vec3) bool {
 }
 
 // Project selects a detail surface within explicit horizontal/up/down bounds.
+// Candidate scratch grows lazily up to Limits.Candidates. Exceeding that limit
+// fails without selecting a surface from an incomplete candidate set.
 func (q *Query) Project(ctx context.Context, p Vec3, o ProjectionOptions, f Filter) ProjectionResult {
 	if st := q.begin(ctx); st.Code != Complete {
 		return ProjectionResult{Status: st}
@@ -385,7 +514,7 @@ func (q *Query) Project(ctx context.Context, p Vec3, o ProjectionOptions, f Filt
 	if !p.Finite() || !q.representable(p) || !finiteNonnegative(o.Horizontal) || !finiteNonnegative(o.Up) || !finiteNonnegative(o.Down) {
 		return ProjectionResult{Status: failure(InvalidInput, "navmesh: invalid projection")}
 	}
-	filter, err := f.detour()
+	filter, err := q.detourFilter(f)
 	if err != nil {
 		return ProjectionResult{Status: failure(InvalidInput, err.Error())}
 	}
@@ -425,20 +554,43 @@ func (q *Query) Project(ctx context.Context, p Vec3, o ProjectionOptions, f Filt
 		center[i] = lower[i] + (upper[i]-lower[i])*.5
 		ext[i] = (upper[i] - lower[i]) * .5
 	}
-	refs := make([]detour.DtPolyRef, q.limits.Candidates)
-	var n int
-	st := q.query.QueryPolygons(center[:], ext[:], filter, refs, &n, len(refs))
-	if detour.DtStatusFailed(st) {
-		return ProjectionResult{Status: failure(InvalidInput, "navmesh: invalid projection bounds")}
+	candidateCapacity := cap(q.refs)
+	if candidateCapacity < detour.DT_POLY_QUERY_BATCH_SIZE {
+		candidateCapacity = detour.DT_POLY_QUERY_BATCH_SIZE
 	}
-	if detour.DtStatusDetail(st, detour.DT_BUFFER_TOO_SMALL) {
-		return ProjectionResult{Status: failure(ResourceExhausted, "navmesh: projection candidate limit")}
+	if candidateCapacity > q.limits.Candidates {
+		candidateCapacity = q.limits.Candidates
+	}
+	var refs []detour.DtPolyRef
+	var n int
+	for {
+		refs = resizeScratch(&q.refs, candidateCapacity)
+		st := q.query.QueryPolygons(center[:], ext[:], filter, refs, &n, len(refs))
+		if detour.DtStatusFailed(st) {
+			return ProjectionResult{Status: failure(InvalidInput, "navmesh: invalid projection bounds")}
+		}
+		if !detour.DtStatusDetail(st, detour.DT_BUFFER_TOO_SMALL) {
+			break
+		}
+		if candidateCapacity == q.limits.Candidates {
+			return ProjectionResult{Status: failure(ResourceExhausted, "navmesh: projection candidate limit")}
+		}
+		if err := ctx.Err(); err != nil {
+			return ProjectionResult{Status: Status{Code: Cancelled, Reason: Cancelled, Err: err}}
+		}
+		candidateCapacity *= 2
+		if candidateCapacity > q.limits.Candidates {
+			candidateCapacity = q.limits.Candidates
+		}
 	}
 	best := math.Inf(1)
-	tieTolerance := 1e-8
+	// Compare distances in meters: a coordinate ULP is a length, not a squared
+	// distance. Applying it to squared distances makes millimeter-away adjacent
+	// slope polygons tie with exact support, producing false floor ambiguity.
+	tieTolerance := 1e-6
 	for _, v := range pos {
 		ulp := math.Abs(float64(math.Nextafter32(v, float32(math.Inf(1)))) - float64(v))
-		tieTolerance = math.Max(tieTolerance, 8*ulp*math.Max(1, float64(ext[0]+ext[1]+ext[2])))
+		tieTolerance = math.Max(tieTolerance, 8*ulp)
 	}
 	var chosen Surface
 	ambiguous := false
@@ -451,12 +603,12 @@ func (q *Query) Project(ctx context.Context, p Vec3, o ProjectionOptions, f Filt
 			continue
 		}
 		w := q.world(v)
-		dist := (w.X-p.X)*(w.X-p.X) + (w.Y-p.Y)*(w.Y-p.Y) + (w.Z-p.Z)*(w.Z-p.Z)
+		dist := math.Sqrt(distance2(w, p))
 		if dist < best-tieTolerance {
 			chosen = Surface{q.snapshot, ref, w}
 			best = dist
 			ambiguous = false
-		} else if math.Abs(dist-best) <= tieTolerance && math.Abs(w.Y-chosen.position.Y) > 1e-5 {
+		} else if math.Abs(dist-best) <= tieTolerance && math.Abs(w.Y-chosen.position.Y) > tieTolerance {
 			ambiguous = true
 		}
 	}
@@ -475,6 +627,8 @@ func (q *Query) Project(ctx context.Context, p Vec3, o ProjectionOptions, f Filt
 func finiteNonnegative(v float64) bool { return v >= 0 && !math.IsInf(v, 0) && !math.IsNaN(v) }
 
 // FindPath runs a sliced search with cancellation between at most 512 expansions.
+// Extraction scratch is bounded by visited nodes and Limits.PathPolygons;
+// returned paths own their corridor and remain independent of later queries.
 func (q *Query) FindPath(ctx context.Context, start, end Surface, f Filter) PathResult {
 	if st := q.begin(ctx); st.Code != Complete {
 		return PathResult{Status: st}
@@ -483,7 +637,7 @@ func (q *Query) FindPath(ctx context.Context, start, end Surface, f Filter) Path
 	if !q.valid(start) || !q.valid(end) {
 		return PathResult{Status: failure(Stale, "navmesh: invalid or stale path endpoint")}
 	}
-	filter, err := f.detour()
+	filter, err := q.detourFilter(f)
 	if err != nil {
 		return PathResult{Status: failure(InvalidInput, err.Error())}
 	}
@@ -501,7 +655,16 @@ func (q *Query) FindPath(ctx context.Context, start, end Surface, f Filter) Path
 	if detour.DtStatusFailed(st) {
 		return PathResult{Status: failure(Failed, "navmesh: path search failed")}
 	}
-	refs := make([]detour.DtPolyRef, q.limits.PathPolygons)
+	// With ordinary (non-any-angle) search, each output polygon belongs to a
+	// visited node. Bound extraction by actual search work without rerunning it.
+	pathCapacity := 1
+	if start.ref != end.ref {
+		pathCapacity = int(q.query.GetNodePool().GetNodeCount())
+		if pathCapacity > q.limits.PathPolygons {
+			pathCapacity = q.limits.PathPolygons
+		}
+	}
+	refs := resizeScratch(&q.refs, pathCapacity)
 	var n int
 	st = q.query.FinalizeSlicedFindPath(refs, &n, len(refs))
 	if detour.DtStatusFailed(st) || n == 0 {
@@ -529,11 +692,16 @@ func (q *Query) FindPath(ctx context.Context, start, end Surface, f Filter) Path
 func (q *Query) pathFromRefs(start Surface, refs []detour.DtPolyRef, b [3]float32, status Status) PathResult {
 	a := q.local(start.position)
 	n := len(refs)
-	points := make([]float32, q.limits.Corners*3)
-	flags := make([]detour.DtStraightPathFlags, q.limits.Corners)
-	cornRefs := make([]detour.DtPolyRef, q.limits.Corners)
-	var count int
-	st := q.query.FindStraightPath(a[:], b[:], refs, n, points, flags, cornRefs, &count, q.limits.Corners, 0)
+	// Each polygon contributes at most its portal endpoints; reserve extra
+	// endpoints for split ground funnels around explicit off-mesh traversal.
+	cornerLimit := 2*n + 2
+	if cornerLimit > q.limits.Corners {
+		cornerLimit = q.limits.Corners
+	}
+	points := resizeScratch(&q.points, cornerLimit*3)
+	flags := resizeScratch(&q.flags, cornerLimit)
+	cornRefs := resizeScratch(&q.cornRefs, cornerLimit)
+	st, count := q.straightPath(a, b, refs, points, flags, cornRefs)
 	if detour.DtStatusFailed(st) {
 		return PathResult{Status: failure(Failed, "navmesh: straight path failed")}
 	}
@@ -541,20 +709,46 @@ func (q *Query) pathFromRefs(start Surface, refs []detour.DtPolyRef, b [3]float3
 		status.Code = Partial
 		status.Reason = ResourceExhausted
 	}
-	p := &Path{status: status, snapshot: q.snapshot, refs: append([]detour.DtPolyRef(nil), refs...), start: start, end: Surface{q.snapshot, refs[n-1], q.world(b)}}
-	seen := map[artifact.TileKey]bool{}
-	for _, ref := range refs {
+	p := &Path{status: status, snapshot: q.snapshot, refs: append([]detour.DtPolyRef(nil), refs...), corners: make([]Corner, count), start: start, end: Surface{q.snapshot, refs[n-1], q.world(b)}}
+	if q.seenTiles == nil {
+		q.seenTiles = make(map[artifact.TileKey]struct{})
+	}
+	for key := range q.seenTiles {
+		delete(q.seenTiles, key)
+	}
+	tiles := resizeScratch(&q.tiles, n)[:0]
+	startGround, endGround := false, false
+	for i, ref := range refs {
 		var tile *detour.DtMeshTile
 		var poly *detour.DtPoly
 		q.snapshot.mesh.GetTileAndPolyByRef(ref, &tile, &poly)
+		if i == 0 {
+			startGround = ref == start.ref && poly.GetType() == detour.DT_POLYTYPE_GROUND
+		}
+		if i == n-1 {
+			endGround = poly.GetType() == detour.DT_POLYTYPE_GROUND
+		}
 		k := artifact.TileKey{X: tile.Header.X, Z: tile.Header.Y, Layer: tile.Header.Layer}
-		if !seen[k] {
-			p.tiles = append(p.tiles, TileRevision{k, q.snapshot.tiles[k]})
-			seen[k] = true
+		if _, seen := q.seenTiles[k]; !seen {
+			tiles = append(tiles, TileRevision{k, q.snapshot.tiles[k]})
+			q.seenTiles[k] = struct{}{}
 		}
 	}
+	p.tiles = append([]TileRevision(nil), tiles...)
 	for i := 0; i < count; i++ {
 		c := Corner{Position: q.world([3]float32{points[i*3], points[i*3+1], points[i*3+2]})}
+		// Detour clamps boundary points to coarse polygon-edge heights, which
+		// can differ from the selected detail surface at identical XZ. Restore
+		// only global ground endpoints, never split traversal anchors or a
+		// truncated funnel endpoint; the kernel's boundary behavior stays intact.
+		if flags[i]&detour.DT_STRAIGHTPATH_OFFMESH_CONNECTION == 0 {
+			if i == 0 && startGround && flags[i]&detour.DT_STRAIGHTPATH_START != 0 && points[i*3] == a[0] && points[i*3+2] == a[2] {
+				c.Position.Y = start.position.Y
+			}
+			if i == count-1 && endGround && flags[i]&detour.DT_STRAIGHTPATH_END != 0 && !detour.DtStatusDetail(st, detour.DT_BUFFER_TOO_SMALL|detour.DT_PARTIAL_RESULT) && points[i*3] == b[0] && points[i*3+2] == b[2] {
+				c.Position.Y = p.end.position.Y
+			}
+		}
 		if flags[i]&detour.DT_STRAIGHTPATH_OFFMESH_CONNECTION != 0 {
 			ref := cornRefs[i]
 			con := q.snapshot.mesh.GetOffMeshConnectionByRef(ref)
@@ -574,7 +768,7 @@ func (q *Query) pathFromRefs(start Surface, refs []detour.DtPolyRef, b [3]float3
 				}
 			}
 		}
-		p.corners = append(p.corners, c)
+		p.corners[i] = c
 	}
 	if detour.DtStatusDetail(st, detour.DT_BUFFER_TOO_SMALL) && count > 0 {
 		ref := cornRefs[count-1]
@@ -591,6 +785,18 @@ func distance2(a, b Vec3) float64 {
 // Move constrains one local displacement; large movements should be subdivided
 // by the host. It never teleports to another floor by nearest-surface search.
 func (q *Query) Move(ctx context.Context, start Surface, target Vec3, f Filter) MoveResult {
+	return q.move(ctx, start, target, f, true)
+}
+
+// MoveWithoutVisited constrains a local displacement with the same surface,
+// normal, and status as Move, but omits the independently allocated Visited list.
+// Strictly interior movement within one ground polygon needs no traversal
+// scratch; other movement reuses bounded scratch. Visited is always nil.
+func (q *Query) MoveWithoutVisited(ctx context.Context, start Surface, target Vec3, f Filter) MoveResult {
+	return q.move(ctx, start, target, f, false)
+}
+
+func (q *Query) move(ctx context.Context, start Surface, target Vec3, f Filter, includeVisited bool) MoveResult {
 	if st := q.begin(ctx); st.Code != Complete {
 		return MoveResult{Status: st}
 	}
@@ -601,45 +807,96 @@ func (q *Query) Move(ctx context.Context, start Surface, target Vec3, f Filter) 
 	if !target.Finite() || !q.representable(target) {
 		return MoveResult{Status: failure(InvalidInput, "navmesh: invalid movement target")}
 	}
-	filter, err := f.detour()
+	filter, err := q.detourFilter(f)
 	if err != nil {
 		return MoveResult{Status: failure(InvalidInput, err.Error())}
 	}
 	a, b := q.local(start.position), q.local(target)
-	if !q.passes(start.ref, filter) {
+	var tile *detour.DtMeshTile
+	var poly *detour.DtPoly
+	if detour.DtStatusFailed(q.snapshot.mesh.GetTileAndPolyByRef(start.ref, &tile, &poly)) || !filter.PassFilter(start.ref, tile, poly) {
 		return MoveResult{Status: failure(NoSurface, "navmesh: starting surface excluded by filter")}
 	}
 	var pos [3]float32
-	refs := make([]detour.DtPolyRef, q.limits.PathPolygons)
-	var n int
-	var hit bool
-	st := q.query.MoveAlongSurface(start.ref, a[:], b[:], filter, pos[:], refs, &n, len(refs), &hit)
-	if detour.DtStatusFailed(st) || n == 0 {
-		return MoveResult{Status: failure(Failed, "navmesh: surface movement failed")}
-	}
-	if detour.DtStatusDetail(st, detour.DT_BUFFER_TOO_SMALL) {
-		// Detour's visited list is a start-side prefix, while its result position
-		// may be farther ahead. Keep the returned position on the retained prefix.
-		if detour.DtStatusFailed(q.query.ClosestPointOnPoly(refs[n-1], pos[:], pos[:], nil)) {
-			return MoveResult{Status: failure(Failed, "navmesh: truncated movement clamp failed")}
+	var refs []detour.DtPolyRef
+	lastRef, n, st := start.ref, 1, detour.DT_SUCCESS
+	if q.limits.PathPolygons > 1 && strictlyInsideGroundPolygon(tile, poly, b) {
+		// The existing traversal stops immediately in this convex polygon.
+		// One-slot visited buffers still take its truncation path below.
+		pos = b
+	} else {
+		refs = resizeScratch(&q.refs, q.localMovementLimit())
+		var hit bool
+		st = q.query.MoveAlongSurface(start.ref, a[:], b[:], filter, pos[:], refs, &n, len(refs), &hit)
+		if detour.DtStatusFailed(st) || n == 0 {
+			return MoveResult{Status: failure(Failed, "navmesh: surface movement failed")}
+		}
+		lastRef = refs[n-1]
+		if detour.DtStatusDetail(st, detour.DT_BUFFER_TOO_SMALL) {
+			// Detour's visited list is a start-side prefix, while its result position
+			// may be farther ahead. Keep the returned position on the retained prefix.
+			if detour.DtStatusFailed(q.query.ClosestPointOnPoly(lastRef, pos[:], pos[:], nil)) {
+				return MoveResult{Status: failure(Failed, "navmesh: truncated movement clamp failed")}
+			}
 		}
 	}
-	var y float32
-	if detour.DtStatusFailed(q.query.GetPolyHeight(refs[n-1], pos[:], &y)) {
+	if lastRef != start.ref && detour.DtStatusFailed(q.snapshot.mesh.GetTileAndPolyByRef(lastRef, &tile, &poly)) {
+		return MoveResult{Status: failure(NoSurface, "navmesh: movement height unavailable")}
+	}
+	y, normal, heightStatus := q.sampleMovementSurface(lastRef, tile, poly, pos)
+	if detour.DtStatusFailed(heightStatus) {
 		return MoveResult{Status: failure(NoSurface, "navmesh: movement height unavailable")}
 	}
 	pos[1] = y
-	out := MoveResult{Surface: Surface{q.snapshot, refs[n-1], q.world(pos)}, Normal: q.normal(refs[n-1], pos)}
+	out := MoveResult{Surface: Surface{q.snapshot, lastRef, q.world(pos)}, Normal: normal}
 	if detour.DtStatusDetail(st, detour.DT_BUFFER_TOO_SMALL|detour.DT_OUT_OF_NODES) {
 		out.Status = Status{Code: Partial, Reason: ResourceExhausted}
 	}
-	for _, r := range refs[:n] {
+	if !includeVisited {
+		return out
+	}
+	out.Visited = make([]Surface, 0, n)
+	for i := 0; i < n; i++ {
+		r := lastRef
+		if refs != nil {
+			r = refs[i]
+		}
 		var nearest [3]float32
 		if !detour.DtStatusFailed(q.query.ClosestPointOnPoly(r, pos[:], nearest[:], nil)) {
 			out.Visited = append(out.Visited, Surface{q.snapshot, r, q.world(nearest)})
 		}
 	}
 	return out
+}
+
+func strictlyInsideGroundPolygon(tile *detour.DtMeshTile, poly *detour.DtPoly, p [3]float32) bool {
+	if poly.GetType() != detour.DT_POLYTYPE_GROUND || poly.VertCount < 3 {
+		return false
+	}
+	var verts [detour.DT_VERTS_PER_POLYGON * 3]float32
+	n := int(poly.VertCount)
+	var sign float64
+	for i, j := 0, n-1; i < n; j, i = i, i+1 {
+		a, b := tile.Verts[int(poly.Verts[j])*3:], tile.Verts[int(poly.Verts[i])*3:]
+		copy(verts[i*3:i*3+3], b[:3])
+		cross := (float64(b[0])-float64(a[0]))*(float64(p[2])-float64(a[2])) - (float64(b[2])-float64(a[2]))*(float64(p[0])-float64(a[0]))
+		if cross == 0 || (sign != 0 && (cross < 0) != (sign < 0)) {
+			return false
+		}
+		sign = cross
+	}
+	// Match the traversal's float32 test as well as excluding exact edges.
+	// Height sampling's numeric edge margin is not a containment criterion.
+	return detour.DtPointInPolygon(p[:], verts[:], n)
+}
+
+func (q *Query) localMovementLimit() int {
+	// Detour reports a full visited buffer as truncated even when its last
+	// node is the endpoint. Keep one spare slot to preserve that status contract.
+	if q.limits.PathPolygons < detour.DT_MAX_LOCAL_NODES+1 {
+		return q.limits.PathPolygons
+	}
+	return detour.DT_MAX_LOCAL_NODES + 1
 }
 
 // Height samples only the selected surface, preserving stacked-floor identity.
@@ -672,7 +929,7 @@ func (q *Query) Raycast(ctx context.Context, s Surface, target Vec3, f Filter) R
 	if !target.Finite() || !q.representable(target) {
 		return RaycastResult{Status: failure(InvalidInput, "navmesh: invalid ray")}
 	}
-	filter, err := f.detour()
+	filter, err := q.detourFilter(f)
 	if err != nil {
 		return RaycastResult{Status: failure(InvalidInput, err.Error())}
 	}
@@ -680,7 +937,7 @@ func (q *Query) Raycast(ctx context.Context, s Surface, target Vec3, f Filter) R
 	if !q.passes(s.ref, filter) {
 		return RaycastResult{Status: failure(NoSurface, "navmesh: starting surface excluded by filter")}
 	}
-	refs := make([]detour.DtPolyRef, q.limits.PathPolygons)
+	refs := resizeScratch(&q.refs, q.limits.PathPolygons)
 	hit := detour.DtRaycastHit{Path: refs, MaxPath: int32(len(refs))}
 	st := q.query.Raycast2(s.ref, a[:], b[:], filter, 0, &hit, 0)
 	if detour.DtStatusFailed(st) {

@@ -114,60 +114,11 @@ func BuildTiles(ctx context.Context, scene geom.Scene, c Config, keys []artifact
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	resolved, err := scene.Resolve(c.Settings.Origin, c.Strict)
+	prepared, err := PrepareSource(scene, c.Settings.Origin, c.Strict)
 	if err != nil {
 		return nil, err
 	}
-	fingerprint, err := c.Fingerprint()
-	if err != nil {
-		return nil, err
-	}
-	if c.Revision == 0 {
-		c.Revision = 1
-	}
-	r := &Result{Bundle: artifact.Bundle{WorldID: c.WorldID, Revision: c.Revision, Profile: c.Profile, Settings: c.Settings, SourceFingerprint: resolved.Fingerprint, ResolvedFingerprint: resolved.ResolvedFingerprint, SettingsFingerprint: fingerprint}, Sources: resolved.Diagnostics}
-	// Link keys depend on stable IDs, never slice order or profile eligibility.
-	index := geom.NewIndex(resolved.Triangles)
-	allLinks := append([]geom.Link(nil), scene.Links...)
-	sortLinks(allLinks)
-	r.Bundle.Links = allLinks
-	regionKeys, err := TileKeys(c)
-	if err != nil {
-		return nil, err
-	}
-	validKeys := make(map[artifact.TileKey]bool, len(regionKeys))
-	for _, key := range regionKeys {
-		validKeys[key] = true
-	}
-	if keys == nil {
-		keys = regionKeys
-	}
-	maxTiles := c.MaxTiles
-	if maxTiles == 0 {
-		maxTiles = 65536
-	}
-	if len(keys) > maxTiles {
-		return nil, fmt.Errorf("bake: tile count exceeds %d", maxTiles)
-	}
-	seen := map[artifact.TileKey]bool{}
-	for _, key := range keys {
-		if !validKeys[key] || seen[key] {
-			return nil, fmt.Errorf("bake: duplicate or out-of-region column %v", key)
-		}
-		seen[key] = true
-		start := time.Now()
-		t, d, e := buildTile(ctx, resolved, index, c, key, allLinks)
-		if e != nil {
-			return nil, fmt.Errorf("bake: tile %v: %w", key, e)
-		}
-		d.Duration = time.Since(start)
-		r.Bundle.Tiles = append(r.Bundle.Tiles, t)
-		r.Diagnostics = append(r.Diagnostics, d)
-	}
-	if err := r.Bundle.Validate(); err != nil {
-		return nil, err
-	}
-	return r, nil
+	return prepared.BuildTiles(ctx, c, keys)
 }
 func sortLinks(a []geom.Link) {
 	for i := 1; i < len(a); i++ {

@@ -124,6 +124,8 @@ int main() {
     std::cout << "{\"reference\":\"9f4ce64458dfae86e1239c525ddc219c4e9e06f1\",\"layers\":" << layers.nlayers << ",\"maxDistance\":" << chf.maxDistance << ",\"meshes\":";
     array(detail.meshes,detail.nmeshes*4);std::cout << ",\"verts\":";array(detail.verts,detail.nverts*3);
     std::cout << ",\"tris\":";array(detail.tris,detail.ntris*4);std::cout << ",\"areas\":";array(mesh.areas,mesh.npolys);
+    std::cout << ",\"coarseVerts\":";array(mesh.verts,mesh.nverts*3);std::cout << ",\"polygons\":";array(mesh.polys,mesh.npolys*mesh.nvp*2);
+    std::cout << ",\"regions\":";array(mesh.regs,mesh.npolys);
     runtimeProbes(c,mesh,detail,probes);
     std::cout << "}\n";
 }

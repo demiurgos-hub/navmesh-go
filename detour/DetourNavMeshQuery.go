@@ -132,12 +132,14 @@ type dtQueryData struct {
 const DT_POLY_QUERY_BATCH_SIZE = 32
 
 type DtNavMeshQuery struct {
-	m_inPolyQuery  bool
-	m_nav          *DtNavMesh   ///< Pointer to navmesh data.
-	m_query        dtQueryData  ///< Sliced query state.
-	m_tinyNodePool *DtNodePool  ///< Pointer to small node pool.
-	m_nodePool     *DtNodePool  ///< Pointer to node pool.
-	m_openList     *DtNodeQueue ///< Pointer to open list queue.
+	m_inPolyQuery    bool
+	m_maxNodes       int
+	m_nav            *DtNavMesh   ///< Pointer to navmesh data.
+	m_query          dtQueryData  ///< Sliced query state.
+	m_tinyNodePool   *DtNodePool  ///< Pointer to small node pool.
+	m_nodePool       *DtNodePool  ///< Pointer to node pool.
+	m_openList       *DtNodeQueue ///< Pointer to open list queue.
+	m_raycastVisited map[DtPolyRef]struct{}
 
 	/// @name Scratch state for the polygon query path.
 	///@{
@@ -164,8 +166,9 @@ type DtNavMeshQuery struct {
 	///@}
 }
 
-// / Gets the node pool.
-// / @returns The node pool.
+// GetNodePool returns the lazily allocated search pool. It is nil until an
+// operation requiring full search scratch runs; projection and movement do not
+// allocate it. The pool remains owned by this nonconcurrent query.
 func (this *DtNavMeshQuery) GetNodePool() *DtNodePool { return this.m_nodePool }
 
 // / Gets the navigation mesh the query object is using.
