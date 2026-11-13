@@ -824,54 +824,7 @@ func simplifyContour(points []int, maxError float32, maxEdgeLen int, buildFlags 
 	}
 
 	pn := len(points) / 4
-	for i := 0; i < len(simplified)/4; {
-		ii := (i + 1) % (len(simplified) / 4)
-
-		ax := simplified[i*4+0]
-		az := simplified[i*4+2]
-		ai := simplified[i*4+3]
-
-		bx := simplified[ii*4+0]
-		bz := simplified[ii*4+2]
-		bi := simplified[ii*4+3]
-
-		maxd := float32(0)
-		maxi := -1
-		var ci, cinc, endi int
-
-		if bx > ax || (bx == ax && bz > az) {
-			cinc = 1
-			ci = (ai + cinc) % pn
-			endi = bi
-		} else {
-			cinc = pn - 1
-			ci = (bi + cinc) % pn
-			endi = ai
-			ax, bx = bx, ax
-			az, bz = bz, az
-		}
-
-		if (points[ci*4+3]&contourRegMask) == 0 ||
-			(points[ci*4+3]&areaBorder) != 0 {
-			for ci != endi {
-				d := distancePtSegInt(points[ci*4+0], points[ci*4+2], ax, az, bx, bz)
-				if d > maxd {
-					maxd = d
-					maxi = ci
-				}
-				ci = (ci + cinc) % pn
-			}
-		}
-
-		if maxi != -1 && maxd > (maxError*maxError) {
-			newVert := []int{points[maxi*4+0], points[maxi*4+1], points[maxi*4+2], maxi}
-			simplified = append(simplified[:(i+1)*4], append(newVert, simplified[(i+1)*4:]...)...)
-		} else {
-			i++
-		}
-	}
-
-	if maxEdgeLen > 0 && (buildFlags&int(contourTessWallEdges|contourTessAreaEdges)) != 0 {
+	for {
 		for i := 0; i < len(simplified)/4; {
 			ii := (i + 1) % (len(simplified) / 4)
 
@@ -883,44 +836,101 @@ func simplifyContour(points []int, maxError float32, maxEdgeLen int, buildFlags 
 			bz := simplified[ii*4+2]
 			bi := simplified[ii*4+3]
 
+			maxd := float32(0)
 			maxi := -1
-			ci := (ai + 1) % pn
+			var ci, cinc, endi int
 
-			tess := false
-			if (buildFlags&int(contourTessWallEdges)) != 0 && (points[ci*4+3]&contourRegMask) == 0 {
-				tess = true
-			}
-			if (buildFlags&int(contourTessAreaEdges)) != 0 && (points[ci*4+3]&areaBorder) != 0 {
-				tess = true
+			if bx > ax || (bx == ax && bz > az) {
+				cinc = 1
+				ci = (ai + cinc) % pn
+				endi = bi
+			} else {
+				cinc = pn - 1
+				ci = (bi + cinc) % pn
+				endi = ai
+				ax, bx = bx, ax
+				az, bz = bz, az
 			}
 
-			if tess {
-				dx := bx - ax
-				dz := bz - az
-				if dx*dx+dz*dz > maxEdgeLen*maxEdgeLen {
-					n := 0
-					if bi < ai {
-						n = (bi + pn - ai)
-					} else {
-						n = (bi - ai)
+			if (points[ci*4+3]&contourRegMask) == 0 ||
+				(points[ci*4+3]&areaBorder) != 0 {
+				for ci != endi {
+					d := distancePtSegInt(points[ci*4+0], points[ci*4+2], ax, az, bx, bz)
+					if d > maxd {
+						maxd = d
+						maxi = ci
 					}
-					if n > 1 {
-						if bx > ax || (bx == ax && bz > az) {
-							maxi = (ai + n/2) % pn
-						} else {
-							maxi = (ai + (n+1)/2) % pn
-						}
-					}
+					ci = (ci + cinc) % pn
 				}
 			}
 
-			if maxi != -1 {
+			if maxi != -1 && maxd > (maxError*maxError) {
 				newVert := []int{points[maxi*4+0], points[maxi*4+1], points[maxi*4+2], maxi}
 				simplified = append(simplified[:(i+1)*4], append(newVert, simplified[(i+1)*4:]...)...)
 			} else {
 				i++
 			}
 		}
+
+		if maxEdgeLen > 0 && (buildFlags&int(contourTessWallEdges|contourTessAreaEdges)) != 0 {
+			for i := 0; i < len(simplified)/4; {
+				ii := (i + 1) % (len(simplified) / 4)
+
+				ax := simplified[i*4+0]
+				az := simplified[i*4+2]
+				ai := simplified[i*4+3]
+
+				bx := simplified[ii*4+0]
+				bz := simplified[ii*4+2]
+				bi := simplified[ii*4+3]
+
+				maxi := -1
+				ci := (ai + 1) % pn
+
+				tess := false
+				if (buildFlags&int(contourTessWallEdges)) != 0 && (points[ci*4+3]&contourRegMask) == 0 {
+					tess = true
+				}
+				if (buildFlags&int(contourTessAreaEdges)) != 0 && (points[ci*4+3]&areaBorder) != 0 {
+					tess = true
+				}
+
+				if tess {
+					dx := bx - ax
+					dz := bz - az
+					if dx*dx+dz*dz > maxEdgeLen*maxEdgeLen {
+						n := 0
+						if bi < ai {
+							n = (bi + pn - ai)
+						} else {
+							n = (bi - ai)
+						}
+						if n > 1 {
+							if bx > ax || (bx == ax && bz > az) {
+								maxi = (ai + n/2) % pn
+							} else {
+								maxi = (ai + (n+1)/2) % pn
+							}
+						}
+					}
+				}
+
+				if maxi != -1 {
+					newVert := []int{points[maxi*4+0], points[maxi*4+1], points[maxi*4+2], maxi}
+					simplified = append(simplified[:(i+1)*4], append(newVert, simplified[(i+1)*4:]...)...)
+				} else {
+					i++
+				}
+			}
+		}
+
+		refined := refineCrossingWallEdges(points, simplified)
+		if len(refined) == len(simplified) {
+			break
+		}
+		simplified = refined
+		// A retained raw vertex can increase deviation from either new chord.
+		// Reapply the original error/edge limits before accepting the topology.
 	}
 
 	for i := 0; i < len(simplified)/4; i++ {

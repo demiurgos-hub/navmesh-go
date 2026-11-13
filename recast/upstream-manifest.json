@@ -10,7 +10,7 @@
     "repository": "https://github.com/actfuns/recastnavigation",
     "revision": "9d1a09ada038de17331aa2933bda24f77d08c999",
     "package": "recast only",
-    "license_declaration": "README.md: same as original project — Zlib License"
+    "license_declaration": "README.md: same as original project \u2014 Zlib License"
   },
   "stages": [
     {
@@ -117,7 +117,8 @@
     {
       "upstream": "RecastContour.cpp",
       "files": [
-        "contour.go"
+        "contour.go",
+        "contour_topology.go"
       ],
       "functions": [
         "BuildContours",
@@ -128,10 +129,12 @@
       "tests": [
         "TestBuildContourSet",
         "TestBuildAllPartitionsStackedSurfacesAndHole",
-        "TestUpstreamOracle"
+        "TestUpstreamOracle",
+        "TestSimplificationRetainsSimpleWallTopology"
       ],
       "deviations": [
-        "Failed hole merges and incomplete capped traces are build failures."
+        "Failed hole merges and incomplete capped traces are build failures.",
+        "Retain existing raw wall samples to remove newly crossing/touching simplified chords; rerun original distance/edge refinement, preserve shared portals and existing shared endpoints. Exact narrow-strip contour regression."
       ]
     },
     {

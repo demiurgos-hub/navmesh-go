@@ -59,3 +59,12 @@ For an upstream update, review each relevant C++ diff against the pinned SHA,
 record the mapped Go function and any intentional deviation, add a reproducer,
 run both Go regressions and the optional C++ oracle, then update the pin. Do not
 treat repository claims of synchronization as test evidence.
+
+Wall contour simplification retains additional original raw samples when a
+simplified chord introduces an intersection with a nonadjacent edge. The original
+distance and maximum-edge passes run again after each refinement; no tolerance or
+coordinate changes are applied. Shared region portal arcs remain unchanged, and
+existing shared endpoints of weakly simple contours remain admissible. The exact
+narrow-strip regression previously emitted a reversed triangle from a crossing
+nine-vertex outline. This is an intentional correction beyond the pinned C++
+distance-only simplifier, not a relaxation of Detour's polygon validation.

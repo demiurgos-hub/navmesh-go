@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Narrow walkable contours retain raw wall samples when simplified chords cross
+  or touch another edge. Refinement preserves the configured distance/edge limits
+  and shared region portals instead of emitting invalid reversed polygons.
+
 - Tile creation validation reports the invalid section and polygon/edge indices,
   preserving the same strict geometry and bounds checks.
 
