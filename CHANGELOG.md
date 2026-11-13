@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Tile creation validation reports the invalid section and polygon/edge indices,
+  preserving the same strict geometry and bounds checks.
+
 - Added explicit binary32 clearance-ratio arithmetic for float-authored
   navigation settings. Height/radius ceil and climb floor share one conversion
   across validation, tile padding and baking. Binary64 remains the default with
