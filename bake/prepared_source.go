@@ -11,11 +11,11 @@ import (
 	"github.com/demiurgos-hub/navmesh-go/geom"
 )
 
-// PreparedSource owns validated, resolved geometry for one exact origin and
+// PreparedSource owns validated, instanced geometry for one exact origin and
 // strictness policy. It is safe to share across concurrent builds; copies of the
 // handle share the same immutable data and lazily constructed spatial index.
-// Retaining it trades live geometry/index memory for avoiding repeated source
-// validation, transformation and indexing. It retains no runtime snapshots.
+// Shared assets and their local indexes are retained once, while transformed
+// triangles are materialized only for selected tiles. It retains no runtime snapshots.
 // Its zero value is not a prepared source.
 type PreparedSource struct{ data *preparedSourceData }
 
@@ -23,23 +23,24 @@ type preparedSourceData struct {
 	origin    [3]uint64
 	strict    bool
 	resolved  geom.Resolved
+	geometry  *geom.PreparedScene
 	links     []geom.Link
 	indexOnce sync.Once
-	index     *geom.Index
+	index     *geom.PreparedIndex
 }
 
-// PrepareSource validates and privately resolves a scene without building an
+// PrepareSource validates and privately copies a scene without building an
 // index or navigation mesh. Later scene mutations cannot affect the result.
 // Resolution is synchronous; large scenes should be prepared off the tick.
 func PrepareSource(scene geom.Scene, origin geom.Vec3, strict bool) (*PreparedSource, error) {
-	resolved, err := scene.Resolve(origin, strict)
+	geometry, err := scene.Prepare(origin, strict)
 	if err != nil {
 		return nil, err
 	}
 	links := copySourceLinks(scene.Links)
 	// World-space metadata includes disabled links; resolved links are local.
 	sortLinks(links)
-	return &PreparedSource{data: &preparedSourceData{origin: sourceOriginBits(origin), strict: strict, resolved: resolved, links: links}}, nil
+	return &PreparedSource{data: &preparedSourceData{origin: sourceOriginBits(origin), strict: strict, resolved: geometry.Metadata(), geometry: geometry, links: links}}, nil
 }
 
 func sourceOriginBits(origin geom.Vec3) [3]uint64 {
@@ -77,16 +78,16 @@ func (s *PreparedSource) TriangleCount() int {
 	if s == nil || s.data == nil {
 		return 0
 	}
-	return len(s.data.resolved.Triangles)
+	return s.data.geometry.TriangleCount()
 }
 
 // TriangleAt returns one resolved triangle entirely by value. No returned
 // vertex or bounds can mutate the prepared source. Invalid indices return false.
 func (s *PreparedSource) TriangleAt(index int) (geom.ResolvedTriangle, bool) {
-	if s == nil || s.data == nil || index < 0 || index >= len(s.data.resolved.Triangles) {
+	if s == nil || s.data == nil || index < 0 || index >= s.data.geometry.TriangleCount() {
 		return geom.ResolvedTriangle{}, false
 	}
-	return s.data.resolved.Triangles[index], true
+	return s.data.geometry.TriangleAt(index)
 }
 
 // BuildTiles bakes selected columns from this immutable source; nil keys means
@@ -145,7 +146,7 @@ func (s *PreparedSource) BuildTiles(ctx context.Context, c Config, keys []artifa
 		seen[key] = true
 	}
 	if len(keys) > 0 {
-		data.indexOnce.Do(func() { data.index = geom.NewIndex(data.resolved.Triangles) })
+		data.indexOnce.Do(func() { data.index = data.geometry.NewIndex() })
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -155,7 +156,7 @@ func (s *PreparedSource) BuildTiles(ctx context.Context, c Config, keys []artifa
 		SettingsFingerprint: fingerprint, Links: copySourceLinks(data.links)}, Sources: append([]geom.Diagnostic(nil), data.resolved.Diagnostics...)}
 	for _, key := range keys {
 		start := time.Now()
-		t, d, e := buildTile(ctx, data.resolved, data.index, c, key, data.links)
+		t, d, e := buildTileGeometry(ctx, data.resolved.Volumes, data.index.Visit, c, key, data.links)
 		if e != nil {
 			return nil, fmt.Errorf("bake: tile %v: %w", key, e)
 		}

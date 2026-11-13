@@ -10,10 +10,12 @@ Use a separate dataset for each physical clearance/slope/climb profile unless
 the caller explicitly accepts another profile's conservative restrictions.
 Avoidance radius and traversal costs do not change baked clearance.
 
-`bake.PrepareSource` resolves authored geometry into an opaque immutable handle
-bound to the exact origin bits and strictness policy. Repeated `BuildTiles` calls
-reuse that resolution and a spatial index constructed once by the first nonempty
-build. Concurrent builds can share the handle. Configuration, precision, resource
+`bake.PrepareSource` validates and copies authored geometry into an opaque
+immutable handle bound to the exact origin bits and strictness policy. It retains
+canonical assets and placements instead of a triangle copy for every placement.
+One validation/hash pass preserves exact resolved fingerprints and diagnostics.
+The first nonempty build constructs shared local asset indexes and a placement
+index; repeated `BuildTiles` calls expand only selected tile geometry. Concurrent builds can share the handle. Configuration, precision, resource
 limits and output validation still run for each build. Result diagnostics and
 link metadata, including nested profile lists, are independent copies; later
 mutation of either the original scene or returned output cannot change the handle.
@@ -22,9 +24,10 @@ mutation of either the original scene or returned output cannot change the handl
 an in-flight worker can retain an earlier coherent capture until it finishes.
 `Apply` resolves accepted changes once, then publishes the source, metadata and
 revision together. Failure or supersession leaves the prior capture intact.
-This avoids resolving the scene again during `Prepare`, at the cost of retaining
-resolved triangles and the lazy index alongside authored source. Include those
-allocations and active build captures in memory measurements. Prepared sources
+This avoids validating and hashing the scene again during `Prepare`, at the
+cost of retaining canonical assets, placements and shared local indexes alongside
+authored source. Include those allocations and active build captures in memory
+measurements. Prepared sources
 retain no snapshots, and snapshots retain neither prepared sources nor indexes.
 
 `dynamic.World.Apply` validates and copies desired state. Object revision zero

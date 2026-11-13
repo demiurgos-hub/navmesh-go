@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Prepared navigation sources keep canonical assets and placement bounds rather
+  than fully expanded per-instance triangles. Tile builds share local asset
+  indexes and materialize only selected geometry, preserving exact fingerprints,
+  rasterization order, transforms, diagnostics and independently owned results.
+  Added `geom.Scene.Prepare` for reusable immutable instanced source queries.
+
 - Added `geom.Scene.Validate` for full source/transform validation without
   retaining expanded triangles or computing discarded geometry fingerprints.
   It shares admission rules with `Resolve`, including strict degeneracy and

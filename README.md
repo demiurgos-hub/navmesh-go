@@ -76,8 +76,10 @@ unknown fields and writes a completed bundle through a temporary file.
    avoidance radius cannot replace baked clearance.
    For repeated builds from the same source, call `bake.PrepareSource` once and
    reuse its `BuildTiles` method with the same origin and strictness policy.
-   The opaque handle retains resolved geometry and a lazy spatial index;
-   each build still validates its configuration and owns its outputs.
+   The opaque handle retains canonical assets and placements, with one lazy
+   local index per shared asset. Only geometry selected for a tile is expanded;
+   fingerprints and rasterization order match the fully resolved source. Each
+   build still validates its configuration and owns its outputs.
 3. Persist with `artifact.Encode`; load with bounded `artifact.Decode` and
    `navmesh.NewSnapshot`. Artifacts store explicit construction data,
    fingerprints, settings and tile identities, not native pointer layouts.

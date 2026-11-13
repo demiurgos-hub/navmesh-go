@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"sync"
@@ -330,5 +331,38 @@ func TestPreparedSourceConcurrentBuildsOwnResults(t *testing.T) {
 	last, err := source.BuildTiles(context.Background(), cfg, nil)
 	if err != nil || !bytes.Equal(expected, preparedBytes(t, last)) {
 		t.Fatal("concurrent results mutated prepared source", err)
+	}
+}
+
+func TestPreparedRepeatedInstancesMatchFlatBake(t *testing.T) {
+	scene, cfg := preparedFixture(true)
+	for i := 0; i < 4; i++ {
+		tr := geom.Identity()
+		tr[0] = .35
+		if i%2 == 0 {
+			tr[0] = -.35
+		}
+		tr[1], tr[2], tr[5], tr[10] = .13, .08, .6, .4
+		tr[3], tr[7], tr[11] = float64(i)-2, float64(i+1), float64(i)-2
+		scene.Instances = append(scene.Instances, geom.Instance{ID: fmt.Sprintf("repeat-%d", i), AssetID: "ground", Transform: tr})
+	}
+	scene.Instances = append(scene.Instances, geom.Instance{ID: "disabled", AssetID: "ground", Transform: geom.Identity(), Disabled: true})
+	want := separateSourceBuild(t, scene, cfg, nil)
+	prepared, err := PrepareSource(scene, cfg.Settings.Origin, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := prepared.BuildTiles(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(preparedBytes(t, want), preparedBytes(t, got)) {
+		t.Fatal("instanced rasterization changed bundle")
+	}
+	for i := range got.Diagnostics {
+		got.Diagnostics[i].Duration = 0
+	}
+	if !reflect.DeepEqual(want.Diagnostics, got.Diagnostics) || !reflect.DeepEqual(want.Sources, got.Sources) {
+		t.Fatal("instanced diagnostics changed")
 	}
 }

@@ -16,16 +16,24 @@ type indexNode struct {
 
 // NewIndex copies bounds and builds a deterministic median-split spatial index.
 func NewIndex(triangles []ResolvedTriangle) *Index {
-	x := &Index{bounds: make([]Bounds, len(triangles)), order: make([]int, len(triangles))}
+	bounds := make([]Bounds, len(triangles))
 	for i, t := range triangles {
-		x.bounds[i] = t.Bounds
+		bounds[i] = t.Bounds
+	}
+	return newBoundsIndex(bounds)
+}
+
+func newBoundsIndex(bounds []Bounds) *Index {
+	x := &Index{bounds: bounds, order: make([]int, len(bounds))}
+	for i := range x.order {
 		x.order[i] = i
 	}
-	if len(triangles) > 0 {
-		x.build(0, len(triangles))
+	if len(bounds) > 0 {
+		x.build(0, len(bounds))
 	}
 	return x
 }
+
 func (x *Index) build(start, end int) int {
 	box := x.bounds[x.order[start]]
 	for _, i := range x.order[start+1 : end] {
@@ -70,6 +78,10 @@ func (x *Index) build(start, end int) int {
 
 // Query returns triangle indices whose bounds intersect the query box.
 func (x *Index) Query(box Bounds) []int {
+	return x.query(func(candidate Bounds) bool { return candidate.Intersects(box) })
+}
+
+func (x *Index) query(intersects func(Bounds) bool) []int {
 	if x == nil || len(x.nodes) == 0 {
 		return nil
 	}
@@ -78,7 +90,7 @@ func (x *Index) Query(box Bounds) []int {
 	for len(stack) > 0 {
 		n := x.nodes[stack[len(stack)-1]]
 		stack = stack[:len(stack)-1]
-		if !n.box.Intersects(box) {
+		if !intersects(n.box) {
 			continue
 		}
 		if n.left >= 0 {
@@ -86,7 +98,7 @@ func (x *Index) Query(box Bounds) []int {
 			continue
 		}
 		for _, i := range x.order[n.start : n.start+n.count] {
-			if x.bounds[i].Intersects(box) {
+			if intersects(x.bounds[i]) {
 				out = append(out, i)
 			}
 		}

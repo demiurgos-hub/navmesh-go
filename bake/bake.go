@@ -162,6 +162,17 @@ func TileBounds(c Config, key artifact.TileKey) geom.Bounds {
 	return geom.Bounds{Min: geom.Vec3{X: s.Origin.X + float64(key.X)*tw - padding, Y: s.Bounds.Min.Y, Z: s.Origin.Z + float64(key.Z)*tw - padding}, Max: geom.Vec3{X: s.Origin.X + (float64(key.X)+1)*tw + padding, Y: s.Bounds.Max.Y, Z: s.Origin.Z + (float64(key.Z)+1)*tw + padding}}
 }
 func buildTile(ctx context.Context, r geom.Resolved, index *geom.Index, c Config, key artifact.TileKey, links []geom.Link) (artifact.Tile, TileDiagnostic, error) {
+	return buildTileGeometry(ctx, r.Volumes, func(box geom.Bounds, visit func(geom.ResolvedTriangle) error) error {
+		for _, i := range index.Query(box) {
+			if err := visit(r.Triangles[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, c, key, links)
+}
+
+func buildTileGeometry(ctx context.Context, volumes []geom.Volume, query func(geom.Bounds, func(geom.ResolvedTriangle) error) error, c Config, key artifact.TileKey, links []geom.Link) (artifact.Tile, TileDiagnostic, error) {
 	tile := artifact.Tile{Key: key, Revision: c.Revision, Empty: true}
 	diag := TileDiagnostic{Key: key}
 	if err := ctx.Err(); err != nil {
@@ -183,22 +194,24 @@ func buildTile(ctx context.Context, r geom.Resolved, index *geom.Index, c Config
 		maxTri = 1 << 20
 	}
 	precision := math.Min(s.CellSize, s.CellHeight) / 16
-	for _, idx := range index.Query(box) {
-		tr := r.Triangles[idx]
+	if err := query(box, func(tr geom.ResolvedTriangle) error {
 		if len(areas) >= maxTri {
-			return tile, diag, fmt.Errorf("triangle limit %d exceeded", maxTri)
+			return fmt.Errorf("triangle limit %d exceeded", maxTri)
 		}
 		for _, p := range tr.Vertices {
 			for _, v := range []float64{p.X, p.Y, p.Z} {
 				f := float32(v)
 				if math.IsInf(float64(f), 0) || math.Abs(float64(math.Nextafter32(f, float32(math.Inf(1))))-float64(f)) > precision {
-					return tile, diag, fmt.Errorf("object %q exceeds float32 precision envelope", tr.ObjectID)
+					return fmt.Errorf("object %q exceeds float32 precision envelope", tr.ObjectID)
 				}
 			}
 			tris = append(tris, len(verts)/3)
 			verts = append(verts, float32(p.X), float32(p.Y), float32(p.Z))
 		}
 		areas = append(areas, tr.Area)
+		return nil
+	}); err != nil {
+		return tile, diag, err
 	}
 	diag.Triangles = len(areas)
 	mode := recast.Monotone
@@ -208,7 +221,7 @@ func buildTile(ctx context.Context, r geom.Resolved, index *geom.Index, c Config
 		mode = recast.Watershed
 	}
 	opt := recast.BuildOptions{Partition: mode, BuildLayers: s.BuildLayers, MaxDetailSamples: c.MaxDetailSamplesPerTile}
-	for _, v := range r.Volumes {
+	for _, v := range volumes {
 		if !box.Intersects(v.Bounds.Expand(geom.Vec3{Y: c.Profile.Height})) {
 			continue
 		}
