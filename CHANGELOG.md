@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Contour triangulation checks both endpoint interior cones before clipping an
+  ear, preserving obstacle holes at duplicated bridge vertices instead of
+  leaving a reversed final triangle.
+
 - Narrow walkable contours retain raw wall samples when simplified chords cross
   or touch another edge. Refinement preserves the configured distance/edge limits
   and shared region portals instead of emitting invalid reversed polygons.

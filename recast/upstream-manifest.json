@@ -153,13 +153,15 @@
       "tests": [
         "TestFullNavmeshBuild",
         "TestUpstreamOracle",
-        "TestBakedStackedSurfacesRemainDisconnectedInDetour"
+        "TestBakedStackedSurfacesRemainDisconnectedInDetour",
+        "TestTriangulationPreservesBridgedHoles"
       ],
       "deviations": [
         "BuildPolyMeshChecked reports failures.",
         "Reject partial triangulation.",
         "Promote uint16 indices before multiplication.",
-        "Use uint32 triangulation flag masks so bit31 does not overflow int on 386."
+        "Use uint32 triangulation flag masks so bit31 does not overflow int on 386.",
+        "Require interior-cone admission at both diagonal endpoints, including loose candidates, to preserve weakly simple hole bridges. Exact six-hole regression checks winding, nonoverlap, covered area and excluded interiors."
       ]
     },
     {

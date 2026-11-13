@@ -150,8 +150,10 @@ func inConeInt(i, j, n int, verts []int, indices []int) bool {
 	return !(leftOnInt(pi, pj, pi1) && leftOnInt(pj, pi, pin1))
 }
 
+// Hole bridges duplicate endpoints, so intersection checks alone do not prove
+// that a diagonal enters the interior wedge at both ends.
 func diagonalInt(i, j, n int, verts []int, indices []int) bool {
-	return inConeInt(i, j, n, verts, indices) && diagonalie(i, j, n, verts, indices)
+	return inConeInt(i, j, n, verts, indices) && inConeInt(j, i, n, verts, indices) && diagonalie(i, j, n, verts, indices)
 }
 
 func diagonalieLoose(i, j, n int, verts []int, indices []int) bool {
@@ -189,7 +191,7 @@ func inConeLoose(i, j, n int, verts []int, indices []int) bool {
 }
 
 func diagonalLoose(i, j, n int, verts []int, indices []int) bool {
-	return inConeLoose(i, j, n, verts, indices) && diagonalieLoose(i, j, n, verts, indices)
+	return inConeLoose(i, j, n, verts, indices) && inConeLoose(j, i, n, verts, indices) && diagonalieLoose(i, j, n, verts, indices)
 }
 
 func triangulate(n int, verts []int, indices []int, tris []int) int {

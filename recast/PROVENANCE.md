@@ -68,3 +68,11 @@ existing shared endpoints of weakly simple contours remain admissible. The exact
 narrow-strip regression previously emitted a reversed triangle from a crossing
 nine-vertex outline. This is an intentional correction beyond the pinned C++
 distance-only simplifier, not a relaxation of Detour's polygon validation.
+
+Contour triangulation validates the interior cone at both diagonal endpoints,
+including its existing loose-collinearity path. Pinned C++ checks only the first
+endpoint; duplicate bridge vertices around multiple holes invalidate the implied
+second-endpoint admission. The exact six-hole regression retains all coordinates,
+checks clockwise nonoverlapping triangles and exact outer-minus-hole area, and
+keeps obstacle interiors excluded. This does not flip triangles, remove holes or
+relax Detour validation.
