@@ -71,7 +71,11 @@ unknown fields and writes a completed bundle through a temporary file.
    X/Z; triangle normals use `cross(b-a, c-a)`. Reflections reverse winding.
    Zero transforms are invalid; use `geom.Identity()`.
 2. Call `bake.Build(ctx, scene, config)` or `bake.BuildTiles` for selected columns.
-   Radius/height round up to voxel clearance; climb rounds down. Different
+   Radius/height round up to voxel clearance; climb rounds down. The default
+   ratio arithmetic is binary64. Set `Settings.ClearancePrecision` to
+   `artifact.ClearanceBinary32` for binary32-authored profile/cell dimensions;
+   operands and quotient then round to binary32 before ceil/floor. This explicit
+   policy never rounds geometry or changes the default arithmetic. Different
    physical profiles generally require separate baked datasets. Area costs and
    avoidance radius cannot replace baked clearance.
    For repeated builds from the same source, call `bake.PrepareSource` once and

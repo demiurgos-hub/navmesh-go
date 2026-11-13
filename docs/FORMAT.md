@@ -17,7 +17,7 @@ fields recursively; it does not copy Go's memory layout.
 | --- | --- |
 | Magic | 8 bytes: `NAVGO\x00\x01\x00` |
 | Format major, minor | uint16 each; currently 1, 0 |
-| Required features | uint32; currently 0 |
+| Required features | uint32; bit 0 selects binary32 clearance ratios |
 | Upstream algorithm SHA | string; exact supported pin |
 | Producer version | string; currently `0.1.0-dev` |
 | Bundle | fields below |
@@ -47,7 +47,15 @@ Coordinates are meters, Y up, X/Z horizontal. The fixed float64 region origin is
 subtracted before local float32 baking. Tile coordinates use mathematical floor.
 The voxel grid is shared by all tiles. Region/edge settings are in voxel units;
 detail distances/errors are meters. Height and radius round up; climb rounds
-down. Border padding is voxel radius plus three cells.
+down. Border padding is voxel radius plus three cells. Omitted/empty
+`Settings.ClearancePrecision` preserves binary64 ratio arithmetic and the
+original artifact bytes. Explicit `"binary32"` rounds profile/cell operands
+and their quotient to binary32 before ceil/floor; required feature bit 0 records
+this policy without changing the body layout. Older readers reject that bit.
+Positive dimensions must remain positive and finite at the selected precision;
+zero radius/climb remain allowed. No epsilon snaps values across boundaries.
+The policy affects clearance counts and matching padding/validation only,
+never source coordinates, transforms, bounds or terrain samples.
 
 Source fingerprints hash canonical source assets, transforms, objects, volumes,
 and links. Resolved fingerprints hash canonical transformed triangles, areas,

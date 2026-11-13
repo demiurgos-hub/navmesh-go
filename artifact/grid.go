@@ -9,6 +9,10 @@ import (
 
 func validateGrid(s Settings, p geom.Profile) ([4]float64, error) {
 	var grid [4]float64
+	clearance, err := s.QuantizeClearance(p)
+	if err != nil {
+		return grid, err
+	}
 	tw := s.CellSize * float64(s.TileSize)
 	if !positive(float64(float32(s.CellSize))) || !positive(float64(float32(s.CellHeight))) || !positive(float64(float32(tw))) {
 		return grid, fmt.Errorf("artifact: grid not representable in float32")
@@ -17,10 +21,10 @@ func validateGrid(s Settings, p geom.Profile) ([4]float64, error) {
 	if !(grid[0] >= math.MinInt32 && grid[1] <= math.MaxInt32 && grid[2] >= math.MinInt32 && grid[3] <= math.MaxInt32) || grid[0] >= grid[1] || grid[2] >= grid[3] || (grid[1]-grid[0])*(grid[3]-grid[2]) > 65536 {
 		return grid, fmt.Errorf("artifact: region tile coordinate/count limit")
 	}
-	if s.Bounds.Min.Y >= s.Bounds.Max.Y || (s.Bounds.Max.Y-s.Bounds.Min.Y)/s.CellHeight > 8191 || math.Ceil(p.Height/s.CellHeight) > 255 || math.Ceil(p.Radius/s.CellSize) > 127 {
+	if s.Bounds.Min.Y >= s.Bounds.Max.Y || (s.Bounds.Max.Y-s.Bounds.Min.Y)/s.CellHeight > 8191 {
 		return grid, fmt.Errorf("artifact: vertical/clearance capacity exceeded")
 	}
-	padding := (math.Ceil(p.Radius/s.CellSize) + 3) * s.CellSize
+	padding := float64(clearance.Radius+3) * s.CellSize
 	values := []float64{grid[0]*tw - padding, grid[1]*tw + padding, grid[2]*tw - padding, grid[3]*tw + padding, s.Bounds.Min.Y - s.Origin.Y, s.Bounds.Max.Y - s.Origin.Y}
 	limit := math.Min(s.CellSize, s.CellHeight) / 16
 	for _, v := range values {
@@ -48,6 +52,9 @@ func tileAligned(s Settings, profile geom.Profile, k TileKey, min, max [3]float3
 		return float64(min[1]) >= s.Bounds.Min.Y-s.Origin.Y-s.CellHeight && float64(max[1]) <= s.Bounds.Max.Y-s.Origin.Y+s.CellHeight
 	}
 	// Recast compact fields extend the upper bound by voxelized clearance.
-	clearance := math.Ceil(profile.Height/s.CellHeight) * s.CellHeight
-	return gridAligned(min[1], s.Bounds.Min.Y-s.Origin.Y, s.CellHeight) && gridAligned(max[1], s.Bounds.Max.Y-s.Origin.Y+clearance, s.CellHeight)
+	clearance, err := s.QuantizeClearance(profile)
+	if err != nil {
+		return false
+	}
+	return gridAligned(min[1], s.Bounds.Min.Y-s.Origin.Y, s.CellHeight) && gridAligned(max[1], s.Bounds.Max.Y-s.Origin.Y+float64(clearance.Height)*s.CellHeight, s.CellHeight)
 }

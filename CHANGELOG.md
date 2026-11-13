@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added explicit binary32 clearance-ratio arithmetic for float-authored
+  navigation settings. Height/radius ceil and climb floor share one conversion
+  across validation, tile padding and baking. Binary64 remains the default with
+  unchanged fingerprints and artifact bytes; binary32 artifacts use a required
+  feature bit so older readers reject the new policy explicitly.
+
 - Prepared navigation sources keep canonical assets and placement bounds rather
   than fully expanded per-instance triangles. Tile builds share local asset
   indexes and materialize only selected geometry, preserving exact fingerprints,

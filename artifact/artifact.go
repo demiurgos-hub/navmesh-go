@@ -23,6 +23,7 @@ const UpstreamRevision = "9f4ce64458dfae86e1239c525ddc219c4e9e06f1"
 // ProducerVersion identifies this unreleased artifact producer.
 const ProducerVersion = "0.1.0-dev"
 const magic = "NAVGO\x00\x01\x00"
+const featureBinary32Clearance uint32 = 1
 
 // Settings records all resolved world-space bake settings. Region areas are in
 // voxels, edge length in voxels, and sampling distances/errors in meters.
@@ -35,6 +36,7 @@ type Settings struct {
 	MinRegionArea, MergeRegionArea, MaxEdgeLength                      int32
 	MaxSimplificationError, DetailSampleDistance, DetailSampleMaxError float64
 	BuildLayers                                                        bool
+	ClearancePrecision                                                 ClearancePrecision `json:",omitempty"`
 }
 
 // TileKey identifies a tile layer within one world/profile bundle.
@@ -329,6 +331,9 @@ func Encode(b Bundle) ([]byte, error) {
 	c.w.WriteString(magic)
 	major, minor := uint16(1), uint16(0)
 	features := uint32(0)
+	if b.Settings.ClearancePrecision == ClearanceBinary32 {
+		features |= featureBinary32Clearance
+	}
 	c.value(&major)
 	c.value(&minor)
 	c.value(&features)
@@ -369,8 +374,11 @@ func Decode(data []byte, limits Limits) (Bundle, error) {
 	c.value(&major)
 	c.value(&minor)
 	c.value(&features)
-	if major != 1 || minor != 0 || features != 0 {
+	if major != 1 || minor != 0 || features & ^featureBinary32Clearance != 0 {
 		return b, errors.New("artifact: unsupported version/features")
+	}
+	if features&featureBinary32Clearance != 0 {
+		b.Settings.ClearancePrecision = ClearanceBinary32
 	}
 	var upstream string
 	c.str(&upstream)

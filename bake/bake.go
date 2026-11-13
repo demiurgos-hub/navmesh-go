@@ -54,6 +54,9 @@ func DefaultConfig(world string, bounds geom.Bounds) Config {
 // Fingerprint hashes all settings affecting geometry, excluding transaction
 // revision and resource limits. It is stable across equivalent builds.
 func (c Config) Fingerprint() (string, error) {
+	if c.Settings.ClearancePrecision != artifact.ClearanceBinary64 && c.Settings.ClearancePrecision != artifact.ClearanceBinary32 {
+		return "", fmt.Errorf("bake: unsupported clearance precision %q", c.Settings.ClearancePrecision)
+	}
 	v := struct {
 		World    string
 		Profile  geom.Profile
@@ -81,12 +84,6 @@ func (c Config) Validate() error {
 	}
 	if (s.Bounds.Max.Y-s.Bounds.Min.Y)/s.CellHeight > 8191 {
 		return fmt.Errorf("bake: vertical span exceeds 8191 cells; partition vertical regions")
-	}
-	if math.Ceil(c.Profile.Height/s.CellHeight) > 255 {
-		return fmt.Errorf("bake: agent height exceeds compact clearance capacity")
-	}
-	if math.Ceil(c.Profile.Radius/s.CellSize) > 127 {
-		return fmt.Errorf("bake: radius exceeds erosion distance capacity")
 	}
 	if s.BuildLayers && s.TileSize > 255 {
 		return fmt.Errorf("bake: compressed layers require tile size <=255")
@@ -155,10 +152,19 @@ func TileKeys(c Config) ([]artifact.TileKey, error) {
 }
 
 // TileBounds returns a tile's padded source-selection box in world coordinates.
+// Invalid clearance settings return invalid bounds; build APIs report the error.
 func TileBounds(c Config, key artifact.TileKey) geom.Bounds {
+	clearance, err := c.Settings.QuantizeClearance(c.Profile)
+	if err != nil {
+		return geom.Bounds{Min: geom.Vec3{X: math.NaN()}}
+	}
+	return tileBounds(c, key, clearance)
+}
+
+func tileBounds(c Config, key artifact.TileKey, clearance artifact.VoxelClearance) geom.Bounds {
 	s := c.Settings
 	tw := s.CellSize * float64(s.TileSize)
-	padding := (math.Ceil(c.Profile.Radius/s.CellSize) + 3) * s.CellSize
+	padding := float64(clearance.Radius+3) * s.CellSize
 	return geom.Bounds{Min: geom.Vec3{X: s.Origin.X + float64(key.X)*tw - padding, Y: s.Bounds.Min.Y, Z: s.Origin.Z + float64(key.Z)*tw - padding}, Max: geom.Vec3{X: s.Origin.X + (float64(key.X)+1)*tw + padding, Y: s.Bounds.Max.Y, Z: s.Origin.Z + (float64(key.Z)+1)*tw + padding}}
 }
 func buildTile(ctx context.Context, r geom.Resolved, index *geom.Index, c Config, key artifact.TileKey, links []geom.Link) (artifact.Tile, TileDiagnostic, error) {
@@ -179,13 +185,17 @@ func buildTileGeometry(ctx context.Context, volumes []geom.Volume, query func(ge
 		return tile, diag, err
 	}
 	s := c.Settings
-	box := TileBounds(c, key)
+	clearance, err := s.QuantizeClearance(c.Profile)
+	if err != nil {
+		return tile, diag, err
+	}
+	box := tileBounds(c, key, clearance)
 	box.Min = sub(box.Min, s.Origin)
 	box.Max = sub(box.Max, s.Origin)
-	radius := int(math.Ceil(c.Profile.Radius / s.CellSize))
+	radius := clearance.Radius
 	border := radius + 3
 	size := int(s.TileSize) + 2*border
-	cfg := recast.Config{Width: size, Height: size, TileSize: int(s.TileSize), BorderSize: border, Cs: float32(s.CellSize), Ch: float32(s.CellHeight), Bmin: vec(box.Min), Bmax: vec(box.Max), WalkableSlopeAngle: float32(c.Profile.MaxSlope), WalkableHeight: int(math.Ceil(c.Profile.Height / s.CellHeight)), WalkableClimb: int(math.Floor(c.Profile.MaxClimb / s.CellHeight)), WalkableRadius: radius, MaxEdgeLen: int(s.MaxEdgeLength), MaxSimplificationError: float32(s.MaxSimplificationError), MinRegionArea: int(s.MinRegionArea), MergeRegionArea: int(s.MergeRegionArea), MaxVertsPerPoly: 6, DetailSampleDist: float32(s.DetailSampleDistance), DetailSampleMaxError: float32(s.DetailSampleMaxError)}
+	cfg := recast.Config{Width: size, Height: size, TileSize: int(s.TileSize), BorderSize: border, Cs: float32(s.CellSize), Ch: float32(s.CellHeight), Bmin: vec(box.Min), Bmax: vec(box.Max), WalkableSlopeAngle: float32(c.Profile.MaxSlope), WalkableHeight: clearance.Height, WalkableClimb: clearance.Climb, WalkableRadius: radius, MaxEdgeLen: int(s.MaxEdgeLength), MaxSimplificationError: float32(s.MaxSimplificationError), MinRegionArea: int(s.MinRegionArea), MergeRegionArea: int(s.MergeRegionArea), MaxVertsPerPoly: 6, DetailSampleDist: float32(s.DetailSampleDistance), DetailSampleMaxError: float32(s.DetailSampleMaxError)}
 	var verts []float32
 	var tris []int
 	var areas []uint8
