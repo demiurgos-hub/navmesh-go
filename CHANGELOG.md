@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added `geom.Scene.Validate` for full source/transform validation without
+  retaining expanded triangles or computing discarded geometry fingerprints.
+  It shares admission rules with `Resolve`, including strict degeneracy and
+  enabled metadata overflow checks.
+
 - Added coherent cached regional safety captures, conservative full-height dirty
   columns, unchanged-polygon support rebasing and managed retention diagnostics.
 - Changed columns remain quarantined across leased retired generations, allowing

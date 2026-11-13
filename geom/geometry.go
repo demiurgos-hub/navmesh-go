@@ -226,6 +226,24 @@ func (s Scene) Fingerprint() (string, error) {
 // Resolve validates and transforms all sources. Degenerate triangles are
 // diagnosed and omitted, or rejected in strict mode. Nothing aliases the scene.
 func (s Scene) Resolve(origin Vec3, strict bool) (Resolved, error) {
+	return s.resolve(origin, strict, resolveOptions{retainTriangles: true, retainMetadata: true, fingerprints: true})
+}
+
+// Validate checks the same source and transformed geometry as Resolve without
+// retaining resolved triangles, diagnostics or metadata, or computing hashes.
+// Strict mode rejects degenerate triangles; otherwise they are omitted.
+func (s Scene) Validate(origin Vec3, strict bool) error {
+	_, err := s.resolve(origin, strict, resolveOptions{})
+	return err
+}
+
+type resolveOptions struct {
+	retainTriangles, retainMetadata, fingerprints bool
+	// The pointer is borrowed only for the callback and reused for the next triangle.
+	triangle func(*ResolvedTriangle)
+}
+
+func (s Scene) resolve(origin Vec3, strict bool, options resolveOptions) (Resolved, error) {
 	var out Resolved
 	if !origin.Finite() {
 		return out, fmt.Errorf("geom: invalid origin")
@@ -284,48 +302,37 @@ func (s Scene) Resolve(origin Vec3, strict bool) (Resolved, error) {
 			triangleCapacity += len(a.Triangles)
 		}
 	}
-	if triangleCapacity > 0 {
+	if options.retainTriangles && triangleCapacity > 0 {
 		out.Triangles = make([]ResolvedTriangle, 0, triangleCapacity)
 	}
+	var triangle ResolvedTriangle
 	for _, obj := range s.Instances {
 		if obj.Disabled {
 			continue
 		}
-		a, t := assets[obj.AssetID], obj.Transform
-		det := t.Determinant()
-		for n, tr := range a.Triangles {
-			r := ResolvedTriangle{Area: tr.Area, ObjectID: obj.ID, SourceTriangle: n}
-			for j, idx := range tr.Indices {
-				v := t.Point(a.Vertices[idx])
-				v.X -= origin.X
-				v.Y -= origin.Y
-				v.Z -= origin.Z
-				if !v.Finite() {
-					return out, fmt.Errorf("geom: transform overflow for %q", obj.ID)
+		a := assets[obj.AssetID]
+		for n := range a.Triangles {
+			var valid bool
+			var err error
+			triangle, valid, err = resolveTriangle(a, obj, origin, n)
+			if err != nil {
+				return out, err
+			}
+			if !valid {
+				if options.retainMetadata {
+					out.Diagnostics = append(out.Diagnostics, Diagnostic{obj.ID, "resolve", "degenerate triangle omitted", n})
 				}
-				r.Vertices[j] = v
-			}
-			if det < 0 {
-				r.Vertices[1], r.Vertices[2] = r.Vertices[2], r.Vertices[1]
-			}
-			u, v := sub(r.Vertices[1], r.Vertices[0]), sub(r.Vertices[2], r.Vertices[0])
-			normal := Vec3{u.Y*v.Z - u.Z*v.Y, u.Z*v.X - u.X*v.Z, u.X*v.Y - u.Y*v.X}
-			if !normal.Finite() {
-				return out, fmt.Errorf("geom: object %q triangle %d exceeds numeric range", obj.ID, n)
-			}
-			if normal.X == 0 && normal.Y == 0 && normal.Z == 0 {
-				d := Diagnostic{obj.ID, "resolve", "degenerate triangle omitted", n}
-				out.Diagnostics = append(out.Diagnostics, d)
 				if strict {
 					return out, fmt.Errorf("geom: %s triangle %d is degenerate", obj.ID, n)
 				}
 				continue
 			}
-			r.Bounds = Bounds{r.Vertices[0], r.Vertices[0]}
-			for _, p := range r.Vertices[1:] {
-				r.Bounds = r.Bounds.Union(Bounds{p, p})
+			if options.retainTriangles {
+				out.Triangles = append(out.Triangles, triangle)
 			}
-			out.Triangles = append(out.Triangles, r)
+			if options.triangle != nil {
+				options.triangle(&triangle)
+			}
 		}
 	}
 	ids = map[string]bool{}
@@ -343,19 +350,34 @@ func (s Scene) Resolve(origin Vec3, strict bool) (Resolved, error) {
 		if v.Shape == "cylinder" && (!finite(v.Radius) || v.Radius <= 0) {
 			return out, fmt.Errorf("geom: invalid cylinder radius")
 		}
+		// Radius participates in authored identity even for noncylinder volumes.
+		if !finite(v.Radius) {
+			return out, fmt.Errorf("geom: nonfinite volume radius %q", v.ID)
+		}
 		if v.Shape == "convex" && len(v.Points) < 3 {
 			return out, fmt.Errorf("geom: convex volume needs three points")
 		}
-		v.Points = append([]Vec3(nil), v.Points...)
+		if options.retainMetadata && !v.Disabled {
+			v.Points = append([]Vec3(nil), v.Points...)
+		}
 		for i, p := range v.Points {
 			if !p.Finite() {
 				return out, fmt.Errorf("geom: invalid convex point")
 			}
-			v.Points[i] = sub(p, origin)
+			point := sub(p, origin)
+			if !v.Disabled && !point.Finite() {
+				return out, fmt.Errorf("geom: volume %q point transform overflow", v.ID)
+			}
+			if options.retainMetadata && !v.Disabled {
+				v.Points[i] = point
+			}
 		}
 		v.Bounds.Min = sub(v.Bounds.Min, origin)
 		v.Bounds.Max = sub(v.Bounds.Max, origin)
-		if !v.Disabled {
+		if !v.Disabled && !v.Bounds.Valid() {
+			return out, fmt.Errorf("geom: volume %q bounds transform overflow", v.ID)
+		}
+		if options.retainMetadata && !v.Disabled {
 			out.Volumes = append(out.Volumes, v)
 		}
 	}
@@ -380,23 +402,60 @@ func (s Scene) Resolve(origin Vec3, strict bool) (Resolved, error) {
 		linkKeys[key] = l.ID
 		l.Start = sub(l.Start, origin)
 		l.End = sub(l.End, origin)
-		l.Profiles = append([]string(nil), l.Profiles...)
-		sort.Strings(l.Profiles)
-		if !l.Disabled {
+		if !l.Disabled && (!l.Start.Finite() || !l.End.Finite()) {
+			return out, fmt.Errorf("geom: link %q transform overflow", l.ID)
+		}
+		if options.retainMetadata && !l.Disabled {
+			l.Profiles = append([]string(nil), l.Profiles...)
+			sort.Strings(l.Profiles)
 			out.Links = append(out.Links, l)
 		}
 	}
 	sort.Slice(out.Links, func(i, j int) bool { return out.Links[i].ID < out.Links[j].ID })
 	var err error
-	out.Fingerprint, err = s.Fingerprint()
-	if err == nil {
-		if len(out.Triangles) == 0 {
-			out.Triangles = nil
+	if options.fingerprints {
+		out.Fingerprint, err = s.Fingerprint()
+		if err == nil {
+			if len(out.Triangles) == 0 {
+				out.Triangles = nil
+			}
+			out.ResolvedFingerprint, err = fingerprintResolved(out)
 		}
-		out.ResolvedFingerprint, err = fingerprintResolved(out)
 	}
 	return out, err
 }
+
+func resolveTriangle(asset Asset, obj Instance, origin Vec3, ordinal int) (ResolvedTriangle, bool, error) {
+	tr := asset.Triangles[ordinal]
+	r := ResolvedTriangle{Area: tr.Area, ObjectID: obj.ID, SourceTriangle: ordinal}
+	for j, idx := range tr.Indices {
+		v := obj.Transform.Point(asset.Vertices[idx])
+		v.X -= origin.X
+		v.Y -= origin.Y
+		v.Z -= origin.Z
+		if !v.Finite() {
+			return r, false, fmt.Errorf("geom: transform overflow for %q", obj.ID)
+		}
+		r.Vertices[j] = v
+	}
+	if obj.Transform.Determinant() < 0 {
+		r.Vertices[1], r.Vertices[2] = r.Vertices[2], r.Vertices[1]
+	}
+	u, v := sub(r.Vertices[1], r.Vertices[0]), sub(r.Vertices[2], r.Vertices[0])
+	normal := Vec3{u.Y*v.Z - u.Z*v.Y, u.Z*v.X - u.X*v.Z, u.X*v.Y - u.Y*v.X}
+	if !normal.Finite() {
+		return r, false, fmt.Errorf("geom: object %q triangle %d exceeds numeric range", obj.ID, ordinal)
+	}
+	if normal.X == 0 && normal.Y == 0 && normal.Z == 0 {
+		return r, false, nil
+	}
+	r.Bounds = Bounds{r.Vertices[0], r.Vertices[0]}
+	for _, p := range r.Vertices[1:] {
+		r.Bounds = r.Bounds.Union(Bounds{p, p})
+	}
+	return r, true, nil
+}
+
 func sub(a, b Vec3) Vec3 { return Vec3{a.X - b.X, a.Y - b.Y, a.Z - b.Z} }
 
 func validateVolume(v Volume) error {
