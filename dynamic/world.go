@@ -113,6 +113,64 @@ func New(ctx context.Context, scene geom.Scene, config bake.Config) (*World, err
 	return &World{scene: scene, source: source, geometry: geometry, config: config, revision: snapshot.Revision(), current: snapshot, dirty: map[artifact.TileKey]bool{}, state: Committed, leases: map[*navmesh.Snapshot]int{}, unavailable: map[artifact.TileKey]bool{}}, nil
 }
 
+// Adopt publishes a previously baked bundle for source geometry without baking.
+// The bundle must have been built from exactly this scene and configuration:
+// source, resolved and settings fingerprints, world identity, revision, profile
+// and settings must match, and it must cover every configured column once.
+// Hosts use it to reuse a verified on-disk bake while keeping live updates.
+func Adopt(ctx context.Context, scene geom.Scene, config bake.Config, bundle artifact.Bundle) (*World, error) {
+	scene = scene.Clone()
+	if err := normalizeRevisions(geom.Scene{}, &scene); err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		return nil, errors.New("dynamic: nil context")
+	}
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	geometry, err := bake.PrepareSource(scene, config.Settings.Origin, config.Strict)
+	if err != nil {
+		return nil, err
+	}
+	settings, err := config.Fingerprint()
+	if err != nil {
+		return nil, err
+	}
+	if bundle.SourceFingerprint != geometry.SourceFingerprint() || bundle.ResolvedFingerprint != geometry.ResolvedFingerprint() || bundle.SettingsFingerprint != settings {
+		return nil, errors.New("dynamic: adopted bundle was baked from different source geometry or settings")
+	}
+	if bundle.WorldID != config.WorldID || bundle.Revision != config.Revision || bundle.Profile != config.Profile || bundle.Settings != config.Settings {
+		return nil, errors.New("dynamic: adopted bundle identity differs from the configuration")
+	}
+	keys, err := bake.TileKeys(config)
+	if err != nil {
+		return nil, err
+	}
+	columns := make(map[artifact.TileKey]bool, len(keys))
+	for _, key := range keys {
+		columns[key] = true
+	}
+	for _, tile := range bundle.Tiles {
+		if !columns[tile.Key] || tile.Revision != config.Revision {
+			return nil, fmt.Errorf("dynamic: adopted bundle has a duplicate, foreign or stale column %v", tile.Key)
+		}
+		delete(columns, tile.Key)
+	}
+	if len(columns) != 0 {
+		return nil, errors.New("dynamic: adopted bundle does not cover every configured column")
+	}
+	snapshot, err := navmesh.NewSnapshot(bundle)
+	if err != nil {
+		return nil, err
+	}
+	source := sourceState(scene, geometry, config.Settings.Origin, config.Settings.Bounds, config.Profile.Height)
+	return &World{scene: scene, source: source, geometry: geometry, config: config, revision: snapshot.Revision(), current: snapshot, dirty: map[artifact.TileKey]bool{}, state: Committed, leases: map[*navmesh.Snapshot]int{}, unavailable: map[artifact.TileKey]bool{}}, nil
+}
+
 // Snapshot returns the immutable current snapshot. Managed hosts should Acquire
 // a lease instead so retention limits account for their long-running readers.
 func (w *World) Snapshot() *navmesh.Snapshot { w.mu.Lock(); defer w.mu.Unlock(); return w.current }

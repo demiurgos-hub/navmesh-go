@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `dynamic.Adopt` publishes a previously baked bundle for the exact source scene
+  and configuration without baking again. It verifies source, resolved and
+  settings fingerprints, identity, revision and complete column coverage, then
+  accepts the same live `Apply`/`Prepare`/`Commit` updates as `dynamic.New`.
+
 - Contour triangulation checks both endpoint interior cones before clipping an
   ear, preserving obstacle holes at duplicated bridge vertices instead of
   leaving a reversed final triangle.
