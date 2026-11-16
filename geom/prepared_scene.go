@@ -22,6 +22,17 @@ type preparedInstance struct {
 	first, count int
 	omitted      []int
 	bounds       Bounds
+	signature    [32]byte
+}
+
+// ResolvedObject summarizes one placement's valid resolved triangles. Bounds
+// is the union of their region-local bounds; Signature is the object digest
+// that the resolved fingerprint commits to, covering vertices, areas and order.
+type ResolvedObject struct {
+	ID        string
+	Triangles int
+	Bounds    Bounds
+	Signature [32]byte
 }
 
 // Prepare validates and copies the scene, preserving Resolve's exact ordering,
@@ -44,7 +55,7 @@ func (s Scene) Prepare(origin Vec3, strict bool) (*PreparedScene, error) {
 		placements[obj.ID] = len(p.instances)
 		p.instances = append(p.instances, preparedInstance{object: obj, asset: assets[obj.AssetID]})
 	}
-	digest := resolvedFingerprintStream{writer: newFingerprintWriter()}
+	digest := newResolvedDigest(func(id string, signature [32]byte) { p.instances[placements[id]].signature = signature })
 	metadata, err := s.resolve(origin, strict, resolveOptions{retainMetadata: true, triangle: func(tr *ResolvedTriangle) {
 		instance := &p.instances[placements[tr.ObjectID]]
 		if instance.count == 0 {
@@ -62,7 +73,7 @@ func (s Scene) Prepare(origin Vec3, strict bool) (*PreparedScene, error) {
 	if err != nil {
 		return nil, err
 	}
-	metadata.ResolvedFingerprint, err = digest.finish(metadata)
+	metadata.ResolvedFingerprint, err = digest.finish(metadata.Volumes, metadata.Links)
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +102,20 @@ func (p *PreparedScene) Metadata() Resolved {
 	r.Volumes, r.Links = s.Volumes, s.Links
 	r.Diagnostics = append([]Diagnostic(nil), r.Diagnostics...)
 	return r
+}
+
+// Objects returns every placement with valid triangles in resolution order.
+func (p *PreparedScene) Objects() []ResolvedObject {
+	if p == nil {
+		return nil
+	}
+	out := make([]ResolvedObject, 0, len(p.instances))
+	for _, instance := range p.instances {
+		if instance.count != 0 {
+			out = append(out, ResolvedObject{instance.object.ID, instance.count, instance.bounds, instance.signature})
+		}
+	}
+	return out
 }
 
 // TriangleCount returns the valid transformed triangle count without allocating.

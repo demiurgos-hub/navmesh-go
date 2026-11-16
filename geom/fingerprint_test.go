@@ -2,8 +2,10 @@ package geom
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"reflect"
 	"sort"
 	"testing"
@@ -39,16 +41,7 @@ func TestResolveDoesNotBorrowMutableSourceArrays(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := json.Marshal(r)
-	canonical, err := json.Marshal(struct {
-		Triangles []ResolvedTriangle
-		Volumes   []Volume
-		Links     []Link
-	}{r.Triangles, r.Volumes, r.Links})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := sha256.Sum256(canonical)
-	if r.ResolvedFingerprint != hex.EncodeToString(want[:]) {
+	if r.ResolvedFingerprint != referenceResolvedFingerprint(t, r) {
 		t.Fatal("resolved fingerprint wire representation changed")
 	}
 	s.Assets[0].Vertices[0].X = 99
@@ -67,10 +60,101 @@ func TestEmptyResolvedFingerprintPreservesNullArrays(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := sha256.Sum256([]byte(`{"Triangles":null,"Volumes":null,"Links":null}`))
+		want := sha256.Sum256([]byte("navmesh-go resolved fingerprint v2\x00\x00" + `{"Volumes":null,"Links":null}`))
 		if r.ResolvedFingerprint != hex.EncodeToString(want[:]) || r.Triangles != nil {
 			t.Fatal("empty or degenerate geometry changed canonical representation")
 		}
+	}
+}
+
+// referenceResolvedFingerprint restates the documented resolved representation.
+func referenceResolvedFingerprint(t *testing.T, r Resolved) string {
+	t.Helper()
+	top := []byte("navmesh-go resolved fingerprint v2\x00")
+	for start := 0; start < len(r.Triangles); {
+		end := start
+		object := sha256.New()
+		for ; end < len(r.Triangles) && r.Triangles[end].ObjectID == r.Triangles[start].ObjectID; end++ {
+			tr := r.Triangles[end]
+			var record [81]byte
+			for i, p := range tr.Vertices {
+				binary.LittleEndian.PutUint64(record[24*i:], math.Float64bits(p.X))
+				binary.LittleEndian.PutUint64(record[24*i+8:], math.Float64bits(p.Y))
+				binary.LittleEndian.PutUint64(record[24*i+16:], math.Float64bits(p.Z))
+			}
+			record[72] = tr.Area
+			binary.LittleEndian.PutUint64(record[73:], uint64(tr.SourceTriangle))
+			object.Write(record[:])
+		}
+		id := r.Triangles[start].ObjectID
+		top = append(top, 1)
+		top = binary.LittleEndian.AppendUint64(top, uint64(len(id)))
+		top = append(top, id...)
+		top = binary.LittleEndian.AppendUint64(top, uint64(end-start))
+		top = object.Sum(top)
+		start = end
+	}
+	annotations, err := json.Marshal(struct {
+		Volumes []Volume
+		Links   []Link
+	}{r.Volumes, r.Links})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(append(append(top, 0), annotations...))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestResolvedFingerprintSeparatesObjectsAndTriangleIdentity(t *testing.T) {
+	plane := Asset{ID: "a", Vertices: []Vec3{{}, {Z: 2}, {X: 2}, {X: 2, Z: 2}}, Triangles: []Triangle{{Indices: [3]uint32{0, 1, 2}, Area: 1}, {Indices: [3]uint32{2, 1, 3}, Area: 1}}}
+	base := Scene{Assets: []Asset{plane}, Instances: []Instance{{ID: "left", AssetID: "a", Transform: Identity()}, {ID: "right", AssetID: "a", Transform: Translation(Vec3{X: 4})}}}
+	fingerprint := func(s Scene) string {
+		r, err := s.Resolve(Vec3{}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := referenceResolvedFingerprint(t, r); r.ResolvedFingerprint != want {
+			t.Fatal("resolved fingerprint differs from its documented representation")
+		}
+		prepared, err := s.Prepare(Vec3{}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prepared.Metadata().ResolvedFingerprint != r.ResolvedFingerprint {
+			t.Fatal("prepared and resolved fingerprints differ")
+		}
+		return r.ResolvedFingerprint
+	}
+	want := fingerprint(base)
+	renamed := base.Clone()
+	renamed.Instances[1].ID = "rightmost"
+	area := base.Clone()
+	area.Assets[0].Triangles[1].Area = 2
+	moved := base.Clone()
+	moved.Instances[1].Transform[3] = 4.5
+	for name, s := range map[string]Scene{"object ID": renamed, "area": area, "vertex": moved} {
+		if fingerprint(s) == want {
+			t.Fatalf("resolved fingerprint ignores a changed %s", name)
+		}
+	}
+}
+
+func TestPreparedObjectsSummarizeResolvedPlacements(t *testing.T) {
+	plane := Asset{ID: "a", Vertices: []Vec3{{}, {Z: 2}, {X: 2}}, Triangles: []Triangle{{Indices: [3]uint32{0, 1, 2}, Area: 1}}}
+	s := Scene{Assets: []Asset{plane}, Instances: []Instance{{ID: "b", AssetID: "a", Transform: Translation(Vec3{X: 4})}, {ID: "a", AssetID: "a", Transform: Identity()}, {ID: "off", AssetID: "a", Transform: Identity(), Disabled: true}}}
+	prepared, err := s.Prepare(Vec3{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := prepared.Objects()
+	if len(objects) != 2 || objects[0].ID != "a" || objects[1].ID != "b" || objects[0].Triangles != 1 {
+		t.Fatalf("objects = %+v", objects)
+	}
+	if objects[1].Bounds != (Bounds{Vec3{X: 4}, Vec3{X: 6, Z: 2}}) {
+		t.Fatalf("bounds = %+v", objects[1].Bounds)
+	}
+	if objects[0].Signature == objects[1].Signature || objects[0].Signature == ([32]byte{}) {
+		t.Fatal("object signatures do not identify transformed triangles")
 	}
 }
 

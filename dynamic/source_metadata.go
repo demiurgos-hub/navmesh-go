@@ -2,7 +2,6 @@ package dynamic
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"math"
 
@@ -25,35 +24,8 @@ type sourceObject struct {
 
 func sourceState(scene geom.Scene, resolved *bake.PreparedSource, origin geom.Vec3, region geom.Bounds, agentHeight float64) sourceMetadata {
 	out := sourceMetadata{fingerprint: resolved.SourceFingerprint(), resolvedFingerprint: resolved.ResolvedFingerprint(), objects: make(map[string]sourceObject, len(scene.Instances)+len(scene.Volumes)+len(scene.Links))}
-	var record [113]byte
-	var lastID, key string
-	for i := 0; i < resolved.TriangleCount(); i++ {
-		triangle, _ := resolved.TriangleAt(i)
-		if triangle.ObjectID != lastID {
-			lastID, key = triangle.ObjectID, "object:"+triangle.ObjectID
-		}
-		value, exists := out.objects[key]
-		if !exists {
-			value.bounds = triangle.Bounds
-		} else {
-			value.bounds = value.bounds.Union(triangle.Bounds)
-		}
-		copy(record[:32], value.signature[:])
-		at := 32
-		for _, p := range triangle.Vertices {
-			for _, v := range [3]float64{p.X, p.Y, p.Z} {
-				binary.LittleEndian.PutUint64(record[at:at+8], math.Float64bits(v))
-				at += 8
-			}
-		}
-		record[104] = triangle.Area
-		binary.LittleEndian.PutUint64(record[105:], uint64(triangle.SourceTriangle))
-		value.signature = sha256.Sum256(record[:])
-		out.objects[key] = value
-	}
-	for key, value := range out.objects {
-		value.bounds = sourceWorldBounds(value.bounds, origin)
-		out.objects[key] = value
+	for _, object := range resolved.Objects() {
+		out.objects["object:"+object.ID] = sourceObject{object.Signature, sourceWorldBounds(object.Bounds, origin)}
 	}
 	// Resolve has already validated the full scene and its JSON fingerprint;
 	// these small value records cannot introduce a serialization error.

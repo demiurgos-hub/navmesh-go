@@ -3,9 +3,17 @@
 ## Unreleased
 
 - `dynamic.Adopt` publishes a previously baked bundle for the exact source scene
-  and configuration without baking again. It verifies source, resolved and
+  and configuration without baking or resolving it. It verifies source and
   settings fingerprints, identity, revision and complete column coverage, then
   accepts the same live `Apply`/`Prepare`/`Commit` updates as `dynamic.New`.
+  Source resolution is deferred to `World.ResolveSource` or the first `Apply`
+  or `Prepare`; a resolved fingerprint that differs from the bundle's dirties
+  every column so the next `Prepare` rebakes from source.
+
+- Resolved fingerprints hash fixed binary triangle records per object instead of
+  canonical JSON, so the values differ from earlier releases. Rebake persisted
+  bundles. `bake.PreparedSource.Objects` exposes each placement's bounds and
+  triangle digest without expanding its triangles.
 
 - Contour triangulation checks both endpoint interior cones before clipping an
   ear, preserving obstacle holes at duplicated bridge vertices instead of

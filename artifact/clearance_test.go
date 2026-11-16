@@ -106,6 +106,10 @@ func TestDefaultClearanceFingerprintAndArtifactBytesRemainCompatible(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The layout is compared under the producer's resolved-fingerprint
+	// definition, which hashed this empty scene's canonical JSON.
+	legacy := sha256.Sum256([]byte(`{"Triangles":null,"Volumes":null,"Links":null}`))
+	result.Bundle.ResolvedFingerprint = fmt.Sprintf("%x", legacy)
 	encoded, err := artifact.Encode(result.Bundle)
 	if err != nil {
 		t.Fatal(err)

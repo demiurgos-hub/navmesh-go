@@ -73,6 +73,15 @@ func (s *PreparedSource) ResolvedFingerprint() string {
 	return s.data.resolved.ResolvedFingerprint
 }
 
+// Objects returns independently owned summaries of every placement with valid
+// triangles, in resolution order, without expanding their triangles.
+func (s *PreparedSource) Objects() []geom.ResolvedObject {
+	if s == nil || s.data == nil {
+		return nil
+	}
+	return s.data.geometry.Objects()
+}
+
 // TriangleCount returns the number of resolved triangles without allocating.
 func (s *PreparedSource) TriangleCount() int {
 	if s == nil || s.data == nil {

@@ -43,6 +43,11 @@ func (w *fingerprintWriter) raw(value string) {
 	}
 	_, w.err = w.h.Write(data)
 }
+func (w *fingerprintWriter) bytes(data []byte) {
+	if w.err == nil {
+		_, w.err = w.h.Write(data)
+	}
+}
 func (w *fingerprintWriter) value(value any) {
 	if w.err == nil {
 		w.err = w.encoder.Encode(value)
@@ -98,18 +103,6 @@ func fingerprintScene(s Scene) (string, error) {
 	fingerprintArray(w, s.Volumes)
 	w.raw(`,"Links":`)
 	fingerprintArray(w, s.Links)
-	w.raw("}")
-	return w.result()
-}
-
-func fingerprintResolved(r Resolved) (string, error) {
-	w := newFingerprintWriter()
-	w.raw(`{"Triangles":`)
-	fingerprintArray(w, r.Triangles)
-	w.raw(`,"Volumes":`)
-	fingerprintArray(w, r.Volumes)
-	w.raw(`,"Links":`)
-	fingerprintArray(w, r.Links)
 	w.raw("}")
 	return w.result()
 }

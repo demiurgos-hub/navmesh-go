@@ -80,6 +80,29 @@ type World struct {
 	safetyToken uint64
 	source      sourceMetadata
 	geometry    *bake.PreparedSource
+	// deferred holds an adopted scene whose geometry is not yet resolved.
+	// Until ResolveSource installs it, source carries only the fingerprints.
+	deferred *deferredSource
+}
+
+// deferredSource resolves an adopted scene once, outside the publication lock.
+type deferredSource struct {
+	once     sync.Once
+	scene    geom.Scene
+	config   bake.Config
+	expected string
+	geometry *bake.PreparedSource
+	source   sourceMetadata
+	err      error
+}
+
+func (d *deferredSource) resolve() {
+	d.once.Do(func() {
+		d.geometry, d.err = bake.PrepareSource(d.scene, d.config.Settings.Origin, d.config.Strict)
+		if d.err == nil {
+			d.source = sourceState(d.scene, d.geometry, d.config.Settings.Origin, d.config.Settings.Bounds, d.config.Profile.Height)
+		}
+	})
 }
 
 // New bakes and validates initial source geometry synchronously.
@@ -113,11 +136,14 @@ func New(ctx context.Context, scene geom.Scene, config bake.Config) (*World, err
 	return &World{scene: scene, source: source, geometry: geometry, config: config, revision: snapshot.Revision(), current: snapshot, dirty: map[artifact.TileKey]bool{}, state: Committed, leases: map[*navmesh.Snapshot]int{}, unavailable: map[artifact.TileKey]bool{}}, nil
 }
 
-// Adopt publishes a previously baked bundle for source geometry without baking.
-// The bundle must have been built from exactly this scene and configuration:
-// source, resolved and settings fingerprints, world identity, revision, profile
-// and settings must match, and it must cover every configured column once.
-// Hosts use it to reuse a verified on-disk bake while keeping live updates.
+// Adopt publishes a previously baked bundle for source geometry without baking
+// or resolving it. Source and settings fingerprints, world identity, revision,
+// profile and settings must match, and the bundle must cover every configured
+// column once. Resolution can differ across module revisions, Go toolchains
+// and architectures, so key persisted bundles by all three. Geometry is
+// resolved by ResolveSource or the first Apply or Prepare; if its resolved
+// fingerprint differs from the bundle's, every column becomes dirty and the
+// next Prepare rebakes the region from source.
 func Adopt(ctx context.Context, scene geom.Scene, config bake.Config, bundle artifact.Bundle) (*World, error) {
 	scene = scene.Clone()
 	if err := normalizeRevisions(geom.Scene{}, &scene); err != nil {
@@ -132,7 +158,7 @@ func Adopt(ctx context.Context, scene geom.Scene, config bake.Config, bundle art
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	geometry, err := bake.PrepareSource(scene, config.Settings.Origin, config.Strict)
+	fingerprint, err := scene.Fingerprint()
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +166,7 @@ func Adopt(ctx context.Context, scene geom.Scene, config bake.Config, bundle art
 	if err != nil {
 		return nil, err
 	}
-	if bundle.SourceFingerprint != geometry.SourceFingerprint() || bundle.ResolvedFingerprint != geometry.ResolvedFingerprint() || bundle.SettingsFingerprint != settings {
+	if bundle.SourceFingerprint != fingerprint || bundle.SettingsFingerprint != settings {
 		return nil, errors.New("dynamic: adopted bundle was baked from different source geometry or settings")
 	}
 	if bundle.WorldID != config.WorldID || bundle.Revision != config.Revision || bundle.Profile != config.Profile || bundle.Settings != config.Settings {
@@ -167,8 +193,49 @@ func Adopt(ctx context.Context, scene geom.Scene, config bake.Config, bundle art
 	if err != nil {
 		return nil, err
 	}
-	source := sourceState(scene, geometry, config.Settings.Origin, config.Settings.Bounds, config.Profile.Height)
-	return &World{scene: scene, source: source, geometry: geometry, config: config, revision: snapshot.Revision(), current: snapshot, dirty: map[artifact.TileKey]bool{}, state: Committed, leases: map[*navmesh.Snapshot]int{}, unavailable: map[artifact.TileKey]bool{}}, nil
+	source := sourceMetadata{fingerprint: fingerprint, resolvedFingerprint: bundle.ResolvedFingerprint}
+	deferred := &deferredSource{scene: scene, config: config, expected: bundle.ResolvedFingerprint}
+	return &World{scene: scene, source: source, deferred: deferred, config: config, revision: snapshot.Revision(), current: snapshot, dirty: map[artifact.TileKey]bool{}, state: Committed, leases: map[*navmesh.Snapshot]int{}, unavailable: map[artifact.TileKey]bool{}}, nil
+}
+
+// ResolveSource resolves geometry that Adopt deferred; it is a no-op otherwise.
+// Apply and Prepare call it, so a host only calls it on its own background
+// worker to keep that synchronous cost off the first live update.
+func (w *World) ResolveSource() error {
+	w.mu.Lock()
+	d := w.deferred
+	w.mu.Unlock()
+	if d == nil {
+		return nil
+	}
+	d.resolve()
+	if d.err != nil {
+		return d.err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.deferred != d {
+		return nil
+	}
+	if d.source.resolvedFingerprint != d.expected {
+		keys, err := bake.TileKeys(w.config)
+		if err != nil {
+			return err
+		}
+		if w.revision == ^uint64(0) {
+			return errors.New("dynamic: revision exhausted")
+		}
+		for _, key := range keys {
+			w.dirty[key] = true
+		}
+		w.revision++
+		w.prepared = nil
+		w.invalidateSafetyLocked()
+		w.state = Pending
+	}
+	w.deferred = nil
+	w.source, w.geometry = d.source, d.geometry
+	return nil
 }
 
 // Snapshot returns the immutable current snapshot. Managed hosts should Acquire
@@ -208,6 +275,9 @@ func (w *World) Desired() (geom.Scene, bake.Config, uint64) {
 // It never holds the publication lock during geometry resolution. Concurrent
 // desired-state edits may return ErrSuperseded and should be recaptured/retried.
 func (w *World) Apply(ch Changes) (Update, error) {
+	if err := w.ResolveSource(); err != nil {
+		return Update{}, err
+	}
 	w.mu.Lock()
 	previous, config, revision, priorSource := w.scene, w.config, w.revision, w.source
 	w.mu.Unlock()
@@ -371,6 +441,9 @@ func (c *Candidate) Revision() uint64 {
 // It does not publish. At most three managed generations including staging are
 // permitted; old leased snapshots are never modified or freed by publication.
 func (w *World) Prepare(ctx context.Context) (*Candidate, error) {
+	if err := w.ResolveSource(); err != nil {
+		return nil, err
+	}
 	w.mu.Lock()
 	if w.building || w.prepared != nil {
 		w.mu.Unlock()

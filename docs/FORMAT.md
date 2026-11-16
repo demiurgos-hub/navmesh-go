@@ -58,8 +58,11 @@ The policy affects clearance counts and matching padding/validation only,
 never source coordinates, transforms, bounds or terrain samples.
 
 Source fingerprints hash canonical source assets, transforms, objects, volumes,
-and links. Resolved fingerprints hash canonical transformed triangles, areas,
-volumes, and links in region coordinates. Settings fingerprints include the
+and links. Resolved fingerprints hash transformed triangles, areas, volumes,
+and links in region coordinates: a per-object SHA-256 over fixed little-endian
+triangle records (nine binary64 vertex coordinates, area byte, uint64 source
+triangle index), then each object's ID, triangle count and digest in resolution
+order, then canonical JSON volumes and links. Settings fingerprints include the
 profile, grid, area-to-flag mapping and strict-input setting, excluding resource
 budgets and transaction revision. They are provenance/cache keys, not evidence
 that two arbitrary independently supplied tile payloads were baked correctly.
